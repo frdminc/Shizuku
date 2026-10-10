@@ -90,6 +90,18 @@ class WatchdogService : Service() {
             scope.launch {
                 ShizukuStateMachine.asFlow().collectLatest { state ->
                     if (state == ShizukuStateMachine.State.CRASHED) {
+                        // A restart run from outside the app (a shell, ops tooling) kills the
+                        // server and starts a new one, and its binder dies here like a crash's.
+                        // Restarting at once started a second starter alongside that one, and the
+                        // two left two servers running. Wait, then restart only if no server came
+                        // back: any later state (the new server's binder arriving, a start or stop
+                        // from elsewhere) cancels this block, and update() asks the binder itself.
+                        Timber.tag(TAG).d("Watchdog: server gone; waiting ${RESTART_GRACE_MS}ms for it to come back before restarting")
+                        delay(RESTART_GRACE_MS)
+                        if (ShizukuStateMachine.update() != ShizukuStateMachine.State.CRASHED) {
+                            ManagerActivityLog.log(applicationContext, "Watchdog: the server came back on its own; no restart")
+                            return@collectLatest
+                        }
                         val now = System.currentTimeMillis()
                         val cooldown = backoffMs(consecutiveCrashes)
                         if (now - lastRestartMs > cooldown) {
@@ -272,6 +284,9 @@ class WatchdogService : Service() {
         private const val ACTION_STOP_SERVICE = "action.stop_service"
         const val WATCHDOG_CHANNEL_ID = "shizuku_watchdog"
         const val CRASH_CHANNEL_ID = "crash_reports"
+
+        /** How long a crash waits for a server restarted from outside the app to come back. */
+        const val RESTART_GRACE_MS = 10_000L
 
         private const val BASE_COOLDOWN_MS = 5_000L
         private const val MAX_COOLDOWN_MS = 300_000L // 5 min cap
