@@ -31,6 +31,7 @@ import java.util.Map;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.function.IntPredicate;
 
 import kotlin.collections.ArraysKt;
 import af.shizuku.common.compat.Android17Compat;
@@ -140,7 +141,7 @@ public class ShizukuConfigManager extends ConfigManager {
 
     private final ShizukuConfig config;
 
-    public ShizukuConfigManager() {
+    public ShizukuConfigManager(IntPredicate isManagerAppId) {
         this.config = load();
 
         boolean changed = false;
@@ -270,7 +271,8 @@ public class ShizukuConfigManager extends ConfigManager {
                 int uid = pi.applicationInfo.uid;
                 boolean allowed;
                 try {
-                    allowed = Android17Compat.checkPermission(activePerm, uid) == PackageManager.PERMISSION_GRANTED;
+                    allowed = Android17Compat.checkPermission(activePerm, uid) == PackageManager.PERMISSION_GRANTED
+                            && PermissionDefiners.isTrusted(activePerm, isManagerAppId);
                 } catch (Throwable e) {
                     LOGGER.w("checkPermission");
                     continue;

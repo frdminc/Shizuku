@@ -433,7 +433,16 @@ public class ShizukuService extends Service<ShizukuUserServiceManager, ShizukuCl
 
     @Override
     public ShizukuConfigManager onCreateConfigManager() {
-        return new ShizukuConfigManager();
+        // Called from super(), before managerAppId and secondaryManagerAppId are initialized.
+        return new ShizukuConfigManager(appId -> {
+            ApplicationInfo primary = getManagerApplicationInfo();
+            if (primary == null) return false;
+            if (appId == UserHandleCompat.getAppId(primary.uid)) return true;
+            String otherApplicationId = ServerConstants.DROPIN_APPLICATION_ID.equals(ServerConstants.MANAGER_APPLICATION_ID)
+                    ? ServerConstants.PLUS_APPLICATION_ID : ServerConstants.DROPIN_APPLICATION_ID;
+            ApplicationInfo secondary = Android17Compat.getApplicationInfo(otherApplicationId, 0, 0);
+            return secondary != null && appId == UserHandleCompat.getAppId(secondary.uid);
+        });
     }
 
     @Override

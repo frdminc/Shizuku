@@ -1,6 +1,7 @@
 package rikka.shizuku.server
 
 import af.shizuku.common.compat.Android17Compat
+import af.shizuku.common.compat.InstalledPackagesCompat
 import af.shizuku.common.util.OsUtils as CommonOsUtils
 import android.content.Intent
 import android.content.pm.ApplicationInfo
@@ -10,6 +11,7 @@ import android.content.pm.PackageManager
 import android.content.pm.UserInfo
 import android.os.Binder
 import android.os.Bundle
+import android.os.Handler
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.mockkConstructor
@@ -25,6 +27,7 @@ import rikka.hidden.compat.PackageManagerApis
 import rikka.hidden.compat.UserManagerApis
 import rikka.shizuku.ShizukuApiConstants
 import rikka.shizuku.server.util.OsUtils
+import rikka.shizuku.server.ktx.workerHandler
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
@@ -197,6 +200,66 @@ class PermissionDefinerConsentTest {
             migrate.invoke(newService(serverUid))
         }
         verify(exactly = 2) { Android17Compat.grantRuntimePermission(APP_PACKAGE, ServerConstants.PERMISSION_LEGACY, 0) }
+    }
+
+    @Test
+    fun `startup does not import holders of a squatter defined permission`() {
+        for (permission in permissions) {
+            for (serverUid in serverUids) {
+                val imported = startupImport(serverUid, permission)
+                assertTrue(imported.packages.isEmpty(), "$permission server uid $serverUid")
+            }
+        }
+    }
+
+    @Test
+    fun `startup still imports holders of a manager defined permission`() {
+        definerPackage = MANAGER_PACKAGE
+        for (permission in permissions) {
+            for (serverUid in serverUids) {
+                val imported = startupImport(serverUid, permission)
+                val entry = imported.packages.single()
+                assertEquals(APP_UID, entry.uid)
+                assertTrue(entry.isAllowed, "$permission server uid $serverUid")
+                assertEquals(listOf(APP_PACKAGE), entry.packages)
+            }
+        }
+    }
+
+    @Test
+    fun `startup does not import held permissions when definer lookup fails`() {
+        every { PermissionDefiners.getPermissionInfo(any()) } throws IllegalStateException("lookup failed")
+        for (permission in permissions) {
+            for (serverUid in serverUids) {
+                val imported = startupImport(serverUid, permission)
+                assertTrue(imported.packages.isEmpty(), "$permission server uid $serverUid")
+            }
+        }
+    }
+
+    private fun startupImport(serverUid: Int, permission: String): ShizukuConfig {
+        val imported = ShizukuConfig()
+        mockkStatic(ShizukuConfigManager::class, InstalledPackagesCompat::class)
+        every { ShizukuConfigManager.load() } returns imported
+        every { UserManagerApis.getUserIdsNoThrow() } returns listOf(0)
+        every { InstalledPackagesCompat.getInstalledPackagesNoThrow(any(), 0) } returns listOf(
+            PackageInfo().apply {
+                packageName = APP_PACKAGE
+                applicationInfo = ApplicationInfo().apply { uid = APP_UID }
+                requestedPermissions = arrayOf(permission)
+            }
+        )
+        every { Android17Compat.checkPermission(permission, APP_UID) } returns PackageManager.PERMISSION_GRANTED
+        every { Android17Compat.getApplicationInfo(MANAGER_PACKAGE, any(), 0) } returns
+            ApplicationInfo().apply { uid = MANAGER_UID }
+        mockkStatic("rikka.shizuku.server.ktx.HandlerKt")
+        every { workerHandler } returns mockk<Handler>(relaxed = true)
+        val service = newService(serverUid)
+        // Service calls this factory from super(), before the manager fields are initialized.
+        setField(ShizukuService::class.java, service, "managerAppId", 0)
+        setField(ShizukuService::class.java, service, "secondaryManagerAppId", 0)
+        service.onCreateConfigManager()
+        return imported
     }
 
     private fun newService(serverUid: Int): ShizukuService {
