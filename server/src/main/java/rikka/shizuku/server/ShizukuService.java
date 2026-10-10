@@ -94,6 +94,13 @@ public class ShizukuService extends Service<ShizukuUserServiceManager, ShizukuCl
             System.exit(0);
             return;
         }
+        // Before the config is loaded: its start-up import already asks who the manager is.
+        waitSystemService("package");
+        if (!ManagerFlavours.chooseAtStartUp(System.getProperty("java.class.path"))) {
+            LOGGER.w("manager app not found in user 0, exiting...");
+            System.exit(ServerConstants.MANAGER_APP_NOT_FOUND);
+            return;
+        }
         RishConfig.setLibraryPath(System.getProperty("shizuku.library.path"));
 
         Looper.prepareMainLooper();
@@ -112,20 +119,18 @@ public class ShizukuService extends Service<ShizukuUserServiceManager, ShizukuCl
         }
     }
 
+    /**
+     * The manager package in user 0, or null when it cannot be found now. Only the flavor chosen
+     * at start-up (ManagerFlavours.chooseAtStartUp) is looked up: a lookup that fails never makes
+     * another package name the manager.
+     */
     public static ApplicationInfo getManagerApplicationInfo() {
-        ApplicationInfo ai = Android17Compat.getApplicationInfo(MANAGER_APPLICATION_ID, 0, 0);
-        if (ai != null) return ai;
-
-        // MANAGER_APPLICATION_ID defaults to the Plus flavor's id. On a Drop-In-only install that
-        // lookup finds nothing, so fall back to the Drop-In id and, if found, correct the constant
-        // so every other usage in this class (binder sending, permission grants, isManager checks,
-        // the request-permission broadcast, ...) resolves to whichever flavor is actually running.
-        ApplicationInfo dropinAi = Android17Compat.getApplicationInfo(ServerConstants.DROPIN_APPLICATION_ID, 0, 0);
-        if (dropinAi != null) {
-            MANAGER_APPLICATION_ID = ServerConstants.DROPIN_APPLICATION_ID;
-            return dropinAi;
+        try {
+            return Android17Compat.getApplicationInfo(MANAGER_APPLICATION_ID, 0, 0);
+        } catch (Throwable t) {
+            LOGGER.w(t, "cannot look up the manager %s", MANAGER_APPLICATION_ID);
+            return null;
         }
-        return null;
     }
 
     @SuppressWarnings({"FieldCanBeLocal"})

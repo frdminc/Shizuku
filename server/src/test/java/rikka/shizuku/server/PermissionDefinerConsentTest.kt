@@ -286,6 +286,24 @@ class PermissionDefinerConsentTest {
     }
 
     @Test
+    fun `a refresh that cannot find the manager does not make the other flavour's package the manager`() {
+        installOtherFlavour(THEIRS)
+        mockkStatic(SystemClock::class)
+        every { SystemClock.uptimeMillis() } returns 60_000L
+        val failures = listOf<() -> ApplicationInfo?>({ null }, { throw IllegalStateException("package manager not answering") })
+        for (failure in failures) {
+            every { Android17Compat.getApplicationInfo(MANAGER_PACKAGE, any(), any()) } answers { failure() }
+            val service = newService(SHELL_UID)
+            assertFalse(service.checkCallerManagerPermission("exit", OTHER_FLAVOUR_UID, OTHER_FLAVOUR_PID))
+            assertEquals(MANAGER_PACKAGE, ServerConstants.MANAGER_APPLICATION_ID, "the flavour chosen at start-up stays")
+            attach(service, OTHER_FLAVOUR_PACKAGE, OTHER_FLAVOUR_UID, OTHER_FLAVOUR_PID)
+            attach(service, MANAGER_PACKAGE, MANAGER_UID, MANAGER_PID)
+            assertTrue(service.checkCallerManagerPermission("exit", MANAGER_UID, MANAGER_PID), "the manager's uid stays")
+        }
+        verify(exactly = 0) { Android17Compat.grantRuntimePermission(OTHER_FLAVOUR_PACKAGE, any(), any()) }
+    }
+
+    @Test
     fun `a permission the other flavour's package defines counts only when the manager's key signs it`() {
         every { Android17Compat.getPackageInfo(APP_PACKAGE, any(), any()) } returns
             PackageInfo().apply { requestedPermissions = heldPermissionNames }
