@@ -13,9 +13,10 @@ import java.util.Collection;
  * package set no longer shares one of them.
  *
  * <p>Only a positive mismatch revokes: a signer read that failed or was incomplete is "unknown"
- * and keeps the grant, the same rule {@link UidPackages} applies to a package list that could not
- * be read. An entry written before digests were recorded has nothing to compare and is given the
- * current ones (trust on first reconcile).
+ * and keeps the entry, the same rule {@link UidPackages} applies to a package list that could not
+ * be read, but the grant is not honoured until a later read confirms it. An entry written before
+ * digests were recorded has nothing to compare and is given the current ones (trust on first
+ * reconcile). Digests are read only on API 28 and later.
  */
 final class GrantSigners {
 

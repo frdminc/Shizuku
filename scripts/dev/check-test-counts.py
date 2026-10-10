@@ -11,7 +11,7 @@ import glob
 import sys
 import xml.etree.ElementTree as ET
 
-FLOORS = {"manager": 164, "server": 74, "database": 8}
+FLOORS = {"manager": 164, "server": 87, "database": 8}
 
 
 def main() -> int:

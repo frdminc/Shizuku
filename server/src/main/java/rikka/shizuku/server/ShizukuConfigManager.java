@@ -32,6 +32,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.function.IntPredicate;
+import java.util.function.Supplier;
 
 import kotlin.collections.ArraysKt;
 import af.shizuku.common.compat.Android17Compat;
@@ -141,6 +142,14 @@ public class ShizukuConfigManager extends ConfigManager {
 
     private final ShizukuConfig config;
 
+    /**
+     * Uids whose stored grant start-up could not check against their packages and signers (a
+     * read that did not answer). The grant is kept but not honoured until find() confirms it.
+     */
+    private final Set<Integer> unconfirmedUids = new HashSet<>();
+    private final Map<Integer, Long> lastRecheck = new HashMap<>();
+    private static final long RECHECK_INTERVAL = 1000;
+
     public ShizukuConfigManager(IntPredicate isManagerAppId) {
         this.config = load();
 
@@ -174,9 +183,18 @@ public class ShizukuConfigManager extends ConfigManager {
         }
 
         if (packagesByUid.isEmpty()) {
+            // Not one installed list was read, so nothing can be checked: keep every grant, but
+            // honour none until find() has checked it against what is installed now.
             LOGGER.w("packagesByUid is empty, skipping config pruning to avoid wiping authorizations");
+            for (ShizukuConfig.PackageEntry entry : config.packages) {
+                unconfirmedUids.add(entry.uid);
+            }
             return;
         }
+
+        // A UID whose grant was removed for a new signer: the import of held API permissions below
+        // must not grant it again.
+        Set<Integer> signerChanged = new HashSet<>();
 
         for (ShizukuConfig.PackageEntry entry : new ArrayList<>(config.packages)) {
             if (entry.packages == null) {
@@ -194,65 +212,22 @@ public class ShizukuConfigManager extends ConfigManager {
                     ? packagesByUid.getOrDefault(uid, Collections.emptyList())
                     : null;
             List<String> packages = UidPackages.of(namedByUserList, () -> PackageManagerApis.getPackagesForUid(uid));
-            if (packages == null) {
-                LOGGER.w("cannot tell whether uid %d still has packages; keeping its config", uid);
-                continue;
+            if (packages != null && !packages.isEmpty()) {
+                packagesByUid.put(uid, packages);
             }
-            if (packages.isEmpty()) {
-                LOGGER.i("remove config for uid %d since it has gone", uid);
+
+            Check result = check(entry, packages, () -> currentSigners(uid, packages));
+            if (result == Check.UNKNOWN) {
+                unconfirmedUids.add(uid);
+            } else if (result == Check.UPDATED) {
+                changed = true;
+            } else if (result != Check.KEEP) {
                 config.packages.remove(entry);
                 changed = true;
-                continue;
-            }
-            packagesByUid.put(uid, packages);
-
-            if (entry.packages.isEmpty()) {
-                // Entries created via the plain toggle path (updateFlagsForUid) used to be
-                // written with no package names at all - that's missing data, not evidence this
-                // uid's packages changed. Treating it as "changed" pruned a still-valid
-                // authorization on every server restart, and separately made getApplications()
-                // exclude the package from the authorized list on the very next refresh (its
-                // membership check on this same empty list always fails). Backfill from the
-                // live package list instead.
-                LOGGER.i("backfilling empty packages list for uid %d from current package manager state", entry.uid);
-                entry.packages.addAll(packages);
-                changed = true;
-                continue;
-            }
-
-            boolean packagesChanged = true;
-
-            for (String packageName : entry.packages) {
-                if (packages.contains(packageName)) {
-                    packagesChanged = false;
-                    break;
+                if (result == Check.SIGNER_CHANGED) {
+                    signerChanged.add(uid);
+                    revokeApiPermissions(uid, packages);
                 }
-            }
-
-            final int rawSize = entry.packages.size();
-            Set<String> s = new LinkedHashSet<>(entry.packages);
-            entry.packages.clear();
-            entry.packages.addAll(s);
-            final int shrunkSize = entry.packages.size();
-            if (shrunkSize < rawSize) {
-                LOGGER.w("entry.packages has duplicate! Shrunk. (%d -> %d)", rawSize, shrunkSize);
-            }
-
-            if (packagesChanged) {
-                LOGGER.i("remove config for uid %d since the packages for it changed", entry.uid);
-                config.packages.remove(entry);
-                changed = true;
-                continue;
-            }
-
-            List<String> signers = currentSigners(uid, packages);
-            if (GrantSigners.revoked(entry.signers, signers)) {
-                LOGGER.w("remove config for uid %d since its packages are no longer signed by the key it was granted to", uid);
-                config.packages.remove(entry);
-                changed = true;
-            } else if (signers != null && !signers.isEmpty() && !signers.equals(entry.signers)) {
-                entry.signers = signers;
-                changed = true;
             }
         }
 
@@ -269,6 +244,8 @@ public class ShizukuConfigManager extends ConfigManager {
                 if (activePerm == null) continue;
 
                 int uid = pi.applicationInfo.uid;
+                if (signerChanged.contains(uid)) continue;
+
                 boolean allowed;
                 try {
                     allowed = Android17Compat.checkPermission(activePerm, uid) == PackageManager.PERMISSION_GRANTED
@@ -319,10 +296,7 @@ public class ShizukuConfigManager extends ConfigManager {
 
     @Nullable
     ShizukuConfig.PackageEntry find(int uid, TrustQuery query) {
-        ShizukuConfig.PackageEntry entry;
-        synchronized (this) {
-            entry = findLocked(uid);
-        }
+        ShizukuConfig.PackageEntry entry = storedEntry(uid);
         if (entry != null && (entry.flags & ConfigManager.FLAG_ALLOWED) != 0) {
             return entry;
         }
@@ -332,11 +306,191 @@ public class ShizukuConfigManager extends ConfigManager {
     /** find() with the trust decision supplied, so a caller reporting it answers from one lookup. */
     @Nullable
     ShizukuConfig.PackageEntry find(int uid, boolean trusted) {
-        ShizukuConfig.PackageEntry entry;
+        return effectiveEntry(uid, storedEntry(uid), trusted);
+    }
+
+    /**
+     * The stored entry for {@code uid}. A grant start-up could not check is kept but withheld
+     * (returned without its permission flags, so neither it nor a held runtime permission's
+     * fallback counts) until a check here, at most one per {@link #RECHECK_INTERVAL} per uid,
+     * confirms it; a check that finds other packages or another signer removes it.
+     */
+    @Nullable
+    private ShizukuConfig.PackageEntry storedEntry(int uid) {
         synchronized (this) {
-            entry = findLocked(uid);
+            ShizukuConfig.PackageEntry entry = findLocked(uid);
+            if (entry == null || !entry.isAllowed() || !unconfirmedUids.contains(uid)) {
+                return entry;
+            }
+            long now = SystemClock.uptimeMillis();
+            Long last = lastRecheck.get(uid);
+            if (last != null && now - last < RECHECK_INTERVAL) {
+                return withheld(entry);
+            }
+            lastRecheck.put(uid, now);
         }
-        return effectiveEntry(uid, entry, trusted);
+        // Package manager IPC, outside the lock.
+        List<String> packages = UidPackages.of(null, () -> PackageManagerApis.getPackagesForUid(uid));
+        List<String> signers = packages == null || packages.isEmpty() ? null : currentSigners(uid, packages);
+        Check result;
+        synchronized (this) {
+            ShizukuConfig.PackageEntry entry = findLocked(uid);
+            if (entry == null || !unconfirmedUids.contains(uid)) {
+                // The operator decided for this uid while the check ran.
+                return entry;
+            }
+            result = check(entry, packages, () -> signers);
+            if (result == Check.UNKNOWN) {
+                return withheld(entry);
+            }
+            if (result == Check.KEEP || result == Check.UPDATED) {
+                unconfirmedUids.remove(uid);
+                lastRecheck.remove(uid);
+                if (result == Check.UPDATED) {
+                    scheduleWriteLocked();
+                }
+                return entry;
+            }
+            removeLocked(uid);
+        }
+        if (result == Check.SIGNER_CHANGED) {
+            revokeApiPermissions(uid, packages);
+        }
+        return null;
+    }
+
+    private static ShizukuConfig.PackageEntry withheld(ShizukuConfig.PackageEntry entry) {
+        ShizukuConfig.PackageEntry copy = new ShizukuConfig.PackageEntry(entry.uid, entry.flags & ~ConfigManager.MASK_PERMISSION);
+        copy.packages.addAll(entry.packages);
+        return copy;
+    }
+
+    /** What checking a stored grant against what is installed under its uid now decided. */
+    enum Check {
+        /** Same packages and a recorded signer, or nothing recorded to compare. */
+        KEEP,
+        /** Kept, and its package names or signers were filled in from the live ones. */
+        UPDATED,
+        GONE,
+        PACKAGES_CHANGED,
+        SIGNER_CHANGED,
+        /** The packages, or the signers of a grant that recorded some, could not be read. */
+        UNKNOWN
+    }
+
+    /**
+     * Checks {@code entry} against {@code packages}, the uid's installed packages now (null when
+     * they could not be read), and the signers {@code signersOf} reads, asked only once the
+     * packages still match. Fills in package names and signers an older entry lacks; never
+     * removes it, which is the caller's job.
+     */
+    private static Check check(ShizukuConfig.PackageEntry entry, @Nullable List<String> packages,
+                               Supplier<List<String>> signersOf) {
+        final int uid = entry.uid;
+        if (packages == null) {
+            LOGGER.w("cannot tell whether uid %d still has packages; keeping its config, unconfirmed", uid);
+            return Check.UNKNOWN;
+        }
+        if (packages.isEmpty()) {
+            LOGGER.i("remove config for uid %d since it has gone", uid);
+            return Check.GONE;
+        }
+
+        if (!entry.packages.isEmpty()) {
+            boolean packagesChanged = true;
+
+            for (String packageName : entry.packages) {
+                if (packages.contains(packageName)) {
+                    packagesChanged = false;
+                    break;
+                }
+            }
+
+            final int rawSize = entry.packages.size();
+            Set<String> s = new LinkedHashSet<>(entry.packages);
+            entry.packages.clear();
+            entry.packages.addAll(s);
+            final int shrunkSize = entry.packages.size();
+            if (shrunkSize < rawSize) {
+                LOGGER.w("entry.packages has duplicate! Shrunk. (%d -> %d)", rawSize, shrunkSize);
+            }
+
+            if (packagesChanged) {
+                LOGGER.i("remove config for uid %d since the packages for it changed", uid);
+                return Check.PACKAGES_CHANGED;
+            }
+        }
+
+        List<String> signers = signersOf.get();
+        if (GrantSigners.revoked(entry.signers, signers)) {
+            LOGGER.w("remove config for uid %d since its packages are no longer signed by the key it was granted to", uid);
+            return Check.SIGNER_CHANGED;
+        }
+        boolean recorded = entry.signers != null && !entry.signers.isEmpty();
+        boolean known = signers != null && !signers.isEmpty();
+        if (recorded && !known) {
+            LOGGER.w("cannot read the signers of uid %d; keeping its config, unconfirmed", uid);
+            return Check.UNKNOWN;
+        }
+
+        boolean updated = false;
+        if (entry.packages.isEmpty()) {
+            // Entries created via the plain toggle path (updateFlagsForUid) used to be
+            // written with no package names at all - that's missing data, not evidence this
+            // uid's packages changed. Treating it as "changed" pruned a still-valid
+            // authorization on every server restart, and separately made getApplications()
+            // exclude the package from the authorized list on the very next refresh (its
+            // membership check on this same empty list always fails). Backfill from the
+            // live package list instead; the signer check above still applies.
+            LOGGER.i("backfilling empty packages list for uid %d from current package manager state", uid);
+            entry.packages.addAll(packages);
+            updated = true;
+        }
+        if (known && !signers.equals(entry.signers)) {
+            entry.signers = signers;
+            updated = true;
+        }
+        return updated ? Check.UPDATED : Check.KEEP;
+    }
+
+    private static final String[] API_PERMISSIONS = {
+            PERMISSION, ServerConstants.PERMISSION_LEGACY, ServerConstants.PERMISSION_ORIGINAL
+    };
+
+    /**
+     * Revokes the Shizuku API runtime permissions that {@code packages}, installed under
+     * {@code uid}, hold. A held one is a grant of its own (the caller permission check, and the
+     * start-up import of holders), so a grant removed for a new signer would otherwise come
+     * straight back. Failures are logged, never thrown.
+     */
+    private static void revokeApiPermissions(int uid, List<String> packages) {
+        int userId = UserHandleCompat.getUserId(uid);
+        for (String packageName : packages) {
+            PackageInfo pi;
+            try {
+                pi = Android17Compat.getPackageInfo(packageName, PackageManager.GET_PERMISSIONS, userId);
+            } catch (Throwable t) {
+                LOGGER.w(t, "cannot read the permissions of %s to revoke them", packageName);
+                continue;
+            }
+            if (pi == null || pi.requestedPermissions == null) {
+                continue;
+            }
+            for (String permission : API_PERMISSIONS) {
+                if (!ArraysKt.contains(pi.requestedPermissions, permission)) {
+                    continue;
+                }
+                try {
+                    if (Android17Compat.checkPermission(permission, uid) != PackageManager.PERMISSION_GRANTED) {
+                        continue;
+                    }
+                    Android17Compat.revokeRuntimePermission(packageName, permission, userId);
+                    LOGGER.i("revoked %s from %s (uid %d) with its grant", permission, packageName, uid);
+                } catch (Throwable t) {
+                    LOGGER.w(t, "revoking %s from %s failed", permission, packageName);
+                }
+            }
+        }
     }
 
     // A trusted signer is always allowed: a stored revoke or deny (including one written before
@@ -532,11 +686,12 @@ public class ShizukuConfigManager extends ConfigManager {
                 && (pi.applicationInfo.flags & ApplicationInfo.FLAG_INSTALLED) != 0;
     }
 
+    /** Uids with a confirmed grant; one start-up could not check is left out until find() confirms it. */
     public List<Integer> getAllowedUids() {
         synchronized (this) {
             List<Integer> result = new ArrayList<>();
             for (ShizukuConfig.PackageEntry entry : config.packages) {
-                if ((entry.flags & ConfigManager.FLAG_ALLOWED) != 0) {
+                if ((entry.flags & ConfigManager.FLAG_ALLOWED) != 0 && !unconfirmedUids.contains(entry.uid)) {
                     result.add(entry.uid);
                 }
             }
@@ -552,7 +707,7 @@ public class ShizukuConfigManager extends ConfigManager {
      * under that uid, any error): unknown, never "no signer".
      */
     @Nullable
-    private static List<String> currentSigners(int uid, @Nullable List<String> names) {
+    static List<String> currentSigners(int uid, @Nullable List<String> names) {
         if (names == null || names.isEmpty() || Build.VERSION.SDK_INT < Build.VERSION_CODES.P) {
             return null;
         }
@@ -639,6 +794,18 @@ public class ShizukuConfigManager extends ConfigManager {
                 : null;
         synchronized (this) {
             updateLocked(uid, packages, mask, values, signers);
+            if ((mask & ConfigManager.MASK_PERMISSION) != 0) {
+                // The operator just decided for this uid, which settles a grant left unconfirmed at
+                // start-up; and a grant answers for the signers it was made with, even when the
+                // entry was already allowed.
+                unconfirmedUids.remove(uid);
+                lastRecheck.remove(uid);
+                ShizukuConfig.PackageEntry entry = findLocked(uid);
+                if (entry != null && signers != null && !signers.isEmpty() && !signers.equals(entry.signers)) {
+                    entry.signers = signers;
+                    scheduleWriteLocked();
+                }
+            }
         }
     }
 
@@ -648,6 +815,8 @@ public class ShizukuConfigManager extends ConfigManager {
             return;
         }
         config.packages.remove(entry);
+        unconfirmedUids.remove(uid);
+        lastRecheck.remove(uid);
         scheduleWriteLocked();
     }
 
