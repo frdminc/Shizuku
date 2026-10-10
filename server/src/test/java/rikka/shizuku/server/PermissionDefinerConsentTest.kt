@@ -1,0 +1,252 @@
+package rikka.shizuku.server
+
+import af.shizuku.common.compat.Android17Compat
+import af.shizuku.common.util.OsUtils as CommonOsUtils
+import android.content.Intent
+import android.content.pm.ApplicationInfo
+import android.content.pm.PermissionInfo
+import android.content.pm.PackageInfo
+import android.content.pm.PackageManager
+import android.content.pm.UserInfo
+import android.os.Binder
+import android.os.Bundle
+import io.mockk.every
+import io.mockk.mockk
+import io.mockk.mockkConstructor
+import io.mockk.mockkStatic
+import io.mockk.unmockkAll
+import io.mockk.verify
+import moe.shizuku.server.IShizukuApplication
+import org.junit.jupiter.api.AfterEach
+import org.junit.jupiter.api.BeforeEach
+import org.junit.jupiter.api.Test
+import rikka.hidden.compat.ActivityManagerApis
+import rikka.hidden.compat.PackageManagerApis
+import rikka.hidden.compat.UserManagerApis
+import rikka.shizuku.ShizukuApiConstants
+import rikka.shizuku.server.util.OsUtils
+import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertTrue
+
+class PermissionDefinerConsentTest {
+
+    private val serverUids = listOf(ROOT_UID, SHELL_UID)
+
+    private lateinit var configManager: ShizukuConfigManager
+    private var callingUid = APP_UID
+    private var callingPid = APP_PID
+    private val startedActivities = mutableListOf<Intent>()
+
+    @BeforeEach
+    fun setup() {
+        mockkStatic(Binder::class)
+        every { Binder.getCallingUid() } answers { callingUid }
+        every { Binder.getCallingPid() } answers { callingPid }
+
+        // Base Service reads rikka.shizuku.server.util.OsUtils, ShizukuService the common copy.
+        mockkStatic(OsUtils::class, CommonOsUtils::class)
+        every { OsUtils.getPid() } returns SERVER_PID
+        every { OsUtils.getSELinuxContext() } returns null
+        every { CommonOsUtils.getPid() } returns SERVER_PID
+        every { CommonOsUtils.getSELinuxContext() } returns null
+
+        mockkStatic(PackageManagerApis::class)
+        every { PackageManagerApis.getPackagesForUidNoThrow(APP_UID) } returns listOf(APP_PACKAGE)
+        every { PackageManagerApis.getPackagesForUidNoThrow(neq(APP_UID)) } returns emptyList()
+
+        mockkStatic(ActivityManagerApis::class)
+        every { ActivityManagerApis.checkPermission(any(), any(), any()) } returns PackageManager.PERMISSION_DENIED
+        every { ActivityManagerApis.startActivityNoThrow(any(), any(), any()) } answers {
+            startedActivities.add(firstArg())
+            0
+        }
+        every { ActivityManagerApis.forceStopPackageNoThrow(any(), any()) } returns Unit
+
+        mockkStatic(Android17Compat::class)
+        every { Android17Compat.getApplicationInfo(any(), any(), any()) } returns null
+        every { Android17Compat.getPackageInfo(any(), any(), any()) } returns PackageInfo()
+        every { Android17Compat.grantRuntimePermission(any(), any(), any()) } returns Unit
+        every { Android17Compat.revokeRuntimePermission(any(), any(), any()) } returns Unit
+
+        mockkStatic(UserManagerApis::class)
+        every { UserManagerApis.getUserInfo(any()) } returns mockk<UserInfo>(relaxed = true)
+
+        // showPermissionConfirmation() builds the dialog intent with chained setters, which the stub
+        // android.jar answers with null.
+        mockkConstructor(Intent::class)
+        every { anyConstructed<Intent>().setPackage(any()) } answers { self as Intent }
+        every { anyConstructed<Intent>().addFlags(any()) } answers { self as Intent }
+        every { anyConstructed<Intent>().putExtra(any(), any<Int>()) } answers { self as Intent }
+        every { anyConstructed<Intent>().putExtra(any(), any<String>()) } answers { self as Intent }
+        every { anyConstructed<Intent>().putExtra(any(), any<android.os.Parcelable>()) } answers { self as Intent }
+
+        mockkStatic(PermissionDefiners::class)
+        every { PermissionDefiners.getPermissionInfo(any()) } answers {
+            PermissionInfo().apply { packageName = definerPackage }
+        }
+        every { Android17Compat.getPackageInfo(MANAGER_PACKAGE, any(), 0) } returns
+            PackageInfo().apply {
+                packageName = MANAGER_PACKAGE
+                applicationInfo = ApplicationInfo().apply {
+                    uid = MANAGER_UID
+                    flags = ApplicationInfo.FLAG_INSTALLED
+                }
+            }
+        every { Android17Compat.getPackageInfo(OTHER_PACKAGE, any(), 0) } returns
+            PackageInfo().apply {
+                packageName = OTHER_PACKAGE
+                applicationInfo = ApplicationInfo().apply {
+                    uid = 10_999
+                    flags = ApplicationInfo.FLAG_INSTALLED
+                }
+            }
+        every { Android17Compat.checkPermission(any<String>(), any<Int>()) } returns PackageManager.PERMISSION_DENIED
+
+        configManager = mockk(relaxed = true)
+        every { configManager.find(any()) } returns null
+        every { configManager.trustOf(any()) } returns ShizukuConfigManager.Trust.NOT_TRUSTED
+        every { configManager.trustOf(any(), any()) } returns ShizukuConfigManager.Trust.NOT_TRUSTED
+    }
+
+    @AfterEach
+    fun teardown() {
+        unmockkAll()
+    }
+
+    private var definerPackage = OTHER_PACKAGE
+
+    @Test
+    fun `held permission from an unrelated definer still requires consent`() {
+        for (permission in permissions) {
+            every { ActivityManagerApis.checkPermission(any(), any(), any()) } returns PackageManager.PERMISSION_DENIED
+            every { ActivityManagerApis.checkPermission(permission, any(), APP_UID) } returns PackageManager.PERMISSION_GRANTED
+            for (serverUid in serverUids) {
+                val service = newService(serverUid)
+                val app = attach(service)
+                val record = service.clientManager.findClient(APP_UID, APP_PID)!!
+                assertFalse(record.allowed, "$permission server uid $serverUid")
+                startedActivities.clear()
+                service.requestPermission(REQUEST_CODE)
+                assertEquals(1, startedActivities.size)
+                assertFalse(record.allowed)
+                verify(exactly = 0) { app.dispatchRequestPermissionResult(any(), any()) }
+            }
+        }
+    }
+
+    @Test
+    fun `held permission defined by the manager allows attach`() {
+        definerPackage = MANAGER_PACKAGE
+        for (permission in permissions) {
+            every { ActivityManagerApis.checkPermission(any(), any(), any()) } returns PackageManager.PERMISSION_DENIED
+            every { ActivityManagerApis.checkPermission(permission, any(), APP_UID) } returns PackageManager.PERMISSION_GRANTED
+            for (serverUid in serverUids) {
+                val service = newService(serverUid)
+                attach(service)
+                assertTrue(service.clientManager.findClient(APP_UID, APP_PID)!!.allowed)
+                startedActivities.clear()
+                service.requestPermission(REQUEST_CODE)
+                assertTrue(startedActivities.isEmpty())
+            }
+        }
+    }
+
+    @Test
+    fun `a failed definer lookup leaves held permissions awaiting consent`() {
+        every { PermissionDefiners.getPermissionInfo(any()) } throws IllegalStateException("lookup failed")
+        every { ActivityManagerApis.checkPermission(ServerConstants.PERMISSION_LEGACY, any(), APP_UID) } returns PackageManager.PERMISSION_GRANTED
+        for (serverUid in serverUids) {
+            val service = newService(serverUid)
+            attach(service)
+            assertFalse(service.clientManager.findClient(APP_UID, APP_PID)!!.allowed)
+            startedActivities.clear()
+            service.requestPermission(REQUEST_CODE)
+            assertEquals(1, startedActivities.size)
+        }
+    }
+
+    @Test
+    fun `uid permission fallback checks the definer too`() {
+        every { Android17Compat.getPackageInfo(APP_PACKAGE, any(), any()) } returns
+            PackageInfo().apply { requestedPermissions = heldPermissionNames }
+        every { Android17Compat.checkPermission(ServerConstants.PERMISSION_LEGACY, APP_UID) } returns PackageManager.PERMISSION_GRANTED
+        for (serverUid in serverUids) {
+            for (owner in listOf(OTHER_PACKAGE, MANAGER_PACKAGE)) {
+                definerPackage = owner
+                val service = newService(serverUid)
+                attach(service)
+                assertEquals(owner == MANAGER_PACKAGE, service.clientManager.findClient(APP_UID, APP_PID)!!.allowed)
+            }
+        }
+    }
+
+    @Test
+    fun `migration grants only permissions defined by a trusted package`() {
+        every { configManager.getAllowedUids() } returns listOf(APP_UID)
+        every { Android17Compat.getPackageInfo(APP_PACKAGE, any(), any()) } returns
+            PackageInfo().apply { requestedPermissions = arrayOf(ServerConstants.PERMISSION_LEGACY) }
+        val migrate = ShizukuService::class.java.getDeclaredMethod("migratePermissionGrants")
+        migrate.isAccessible = true
+        for (serverUid in serverUids) {
+            migrate.invoke(newService(serverUid))
+        }
+        verify(exactly = 0) { Android17Compat.grantRuntimePermission(any(), any(), any()) }
+        definerPackage = MANAGER_PACKAGE
+        for (serverUid in serverUids) {
+            migrate.invoke(newService(serverUid))
+        }
+        verify(exactly = 2) { Android17Compat.grantRuntimePermission(APP_PACKAGE, ServerConstants.PERMISSION_LEGACY, 0) }
+    }
+
+    private fun newService(serverUid: Int): ShizukuService {
+        every { OsUtils.getUid() } returns serverUid
+        every { CommonOsUtils.getUid() } returns serverUid
+        val unsafeField = sun.misc.Unsafe::class.java.getDeclaredField("theUnsafe")
+        unsafeField.isAccessible = true
+        val unsafe = unsafeField.get(null) as sun.misc.Unsafe
+        // The constructor starts the real server; the paths under test only need the managers.
+        val service = unsafe.allocateInstance(ShizukuService::class.java) as ShizukuService
+        val clientManager = ShizukuClientManager(configManager)
+        setField(ShizukuService::class.java, service, "clientManager", clientManager)
+        setField(ShizukuService::class.java, service, "configManager", configManager)
+        setField(Service::class.java, service, "clientManager", clientManager)
+        setField(Service::class.java, service, "configManager", configManager)
+        setField(ShizukuService::class.java, service, "managerAppId", MANAGER_UID)
+        setField(ShizukuService::class.java, service, "secondaryManagerAppId", -1)
+        return service
+    }
+
+    private fun attach(service: ShizukuService): IShizukuApplication {
+        val app = mockk<IShizukuApplication>(relaxed = true)
+        val args = mockk<Bundle>()
+        every { args.getString(ShizukuApiConstants.ATTACH_APPLICATION_PACKAGE_NAME) } returns APP_PACKAGE
+        every { args.getInt(ShizukuApiConstants.ATTACH_APPLICATION_API_VERSION, -1) } returns 13
+        callingUid = APP_UID
+        callingPid = APP_PID
+        service.attachApplication(app, args)
+        return app
+    }
+
+    private fun setField(owner: Class<*>, target: Any, name: String, value: Any) {
+        val field = owner.getDeclaredField(name)
+        field.isAccessible = true
+        field.set(target, value)
+    }
+
+    private companion object {
+        val permissions = arrayOf(ServerConstants.PERMISSION, ServerConstants.PERMISSION_LEGACY, ServerConstants.PERMISSION_ORIGINAL)
+        val heldPermissionNames = permissions
+        const val MANAGER_PACKAGE = "af.shizuku.plus.api"
+        const val OTHER_PACKAGE = "com.example.definer"
+        const val ROOT_UID = 0
+        const val SHELL_UID = 2000
+        const val SERVER_PID = 555
+        const val APP_UID = 10_123
+        const val APP_PID = 4_321
+        const val APP_PACKAGE = "com.example.client"
+        const val MANAGER_UID = 10_050
+        const val MANAGER_PID = 7_777
+        const val REQUEST_CODE = 42
+    }
+}

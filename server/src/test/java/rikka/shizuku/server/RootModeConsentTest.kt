@@ -86,6 +86,19 @@ class RootModeConsentTest {
         every { anyConstructed<Intent>().putExtra(any(), any<String>()) } answers { self as Intent }
         every { anyConstructed<Intent>().putExtra(any(), any<android.os.Parcelable>()) } answers { self as Intent }
 
+        mockkStatic(PermissionDefiners::class)
+        every { PermissionDefiners.getPermissionInfo(any()) } returns android.content.pm.PermissionInfo().apply {
+            packageName = ServerConstants.PLUS_APPLICATION_ID
+        }
+        every { Android17Compat.getPackageInfo(ServerConstants.PLUS_APPLICATION_ID, any(), 0) } returns
+            PackageInfo().apply {
+                packageName = ServerConstants.PLUS_APPLICATION_ID
+                applicationInfo = android.content.pm.ApplicationInfo().apply {
+                    uid = MANAGER_UID
+                    flags = android.content.pm.ApplicationInfo.FLAG_INSTALLED
+                }
+            }
+
         configManager = mockk(relaxed = true)
         every { configManager.find(any()) } returns null
         every { configManager.trustOf(any()) } returns ShizukuConfigManager.Trust.NOT_TRUSTED

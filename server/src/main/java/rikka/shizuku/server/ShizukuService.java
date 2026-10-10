@@ -167,11 +167,14 @@ public class ShizukuService extends Service<ShizukuUserServiceManager, ShizukuCl
                 if (pi == null || pi.requestedPermissions == null) continue;
 
                 String permToGrant = null;
-                if (ArraysKt.contains(pi.requestedPermissions, PERMISSION)) {
+                if (ArraysKt.contains(pi.requestedPermissions, PERMISSION)
+                        && PermissionDefiners.isTrusted(PERMISSION, this::isManagerAppId)) {
                     permToGrant = PERMISSION;
-                } else if (ArraysKt.contains(pi.requestedPermissions, ServerConstants.PERMISSION_ORIGINAL)) {
+                } else if (ArraysKt.contains(pi.requestedPermissions, ServerConstants.PERMISSION_ORIGINAL)
+                        && PermissionDefiners.isTrusted(ServerConstants.PERMISSION_ORIGINAL, this::isManagerAppId)) {
                     permToGrant = ServerConstants.PERMISSION_ORIGINAL;
-                } else if (ArraysKt.contains(pi.requestedPermissions, ServerConstants.PERMISSION_LEGACY)) {
+                } else if (ArraysKt.contains(pi.requestedPermissions, ServerConstants.PERMISSION_LEGACY)
+                        && PermissionDefiners.isTrusted(ServerConstants.PERMISSION_LEGACY, this::isManagerAppId)) {
                     permToGrant = ServerConstants.PERMISSION_LEGACY;
                 }
                 if (permToGrant == null) continue;
@@ -486,11 +489,14 @@ public class ShizukuService extends Service<ShizukuUserServiceManager, ShizukuCl
         try {
             int pid = Binder.getCallingPid();
             int uid = Binder.getCallingUid();
-            if (ActivityManagerApis.checkPermission(ServerConstants.PERMISSION, pid, uid) == PackageManager.PERMISSION_GRANTED)
+            if (ActivityManagerApis.checkPermission(ServerConstants.PERMISSION, pid, uid) == PackageManager.PERMISSION_GRANTED
+                    && PermissionDefiners.isTrusted(ServerConstants.PERMISSION, this::isManagerAppId))
                 return PackageManager.PERMISSION_GRANTED;
-            if (ActivityManagerApis.checkPermission(ServerConstants.PERMISSION_LEGACY, pid, uid) == PackageManager.PERMISSION_GRANTED)
+            if (ActivityManagerApis.checkPermission(ServerConstants.PERMISSION_LEGACY, pid, uid) == PackageManager.PERMISSION_GRANTED
+                    && PermissionDefiners.isTrusted(ServerConstants.PERMISSION_LEGACY, this::isManagerAppId))
                 return PackageManager.PERMISSION_GRANTED;
-            if (ActivityManagerApis.checkPermission(ServerConstants.PERMISSION_ORIGINAL, pid, uid) == PackageManager.PERMISSION_GRANTED)
+            if (ActivityManagerApis.checkPermission(ServerConstants.PERMISSION_ORIGINAL, pid, uid) == PackageManager.PERMISSION_GRANTED
+                    && PermissionDefiners.isTrusted(ServerConstants.PERMISSION_ORIGINAL, this::isManagerAppId))
                 return PackageManager.PERMISSION_GRANTED;
             return PackageManager.PERMISSION_DENIED;
         } catch (Throwable tr) {
@@ -2383,9 +2389,12 @@ public class ShizukuService extends Service<ShizukuUserServiceManager, ShizukuCl
                 }
 
                 try {
-                    if (Android17Compat.checkPermission(PERMISSION, uid) == PackageManager.PERMISSION_GRANTED ||
-                        Android17Compat.checkPermission(ServerConstants.PERMISSION_LEGACY, uid) == PackageManager.PERMISSION_GRANTED ||
-                        Android17Compat.checkPermission(ServerConstants.PERMISSION_ORIGINAL, uid) == PackageManager.PERMISSION_GRANTED) {
+                    if ((Android17Compat.checkPermission(PERMISSION, uid) == PackageManager.PERMISSION_GRANTED
+                            && PermissionDefiners.isTrusted(PERMISSION, this::isManagerAppId)) ||
+                        (Android17Compat.checkPermission(ServerConstants.PERMISSION_LEGACY, uid) == PackageManager.PERMISSION_GRANTED
+                            && PermissionDefiners.isTrusted(ServerConstants.PERMISSION_LEGACY, this::isManagerAppId)) ||
+                        (Android17Compat.checkPermission(ServerConstants.PERMISSION_ORIGINAL, uid) == PackageManager.PERMISSION_GRANTED
+                            && PermissionDefiners.isTrusted(ServerConstants.PERMISSION_ORIGINAL, this::isManagerAppId))) {
                         return ConfigManager.FLAG_ALLOWED;
                     }
                 } catch (Throwable e) {
