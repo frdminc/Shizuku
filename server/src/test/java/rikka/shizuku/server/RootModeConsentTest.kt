@@ -258,6 +258,7 @@ class RootModeConsentTest {
     }
 
     private fun newService(serverUid: Int): ShizukuService {
+        PermissionDefiners.forgetAnswers()
         every { OsUtils.getUid() } returns serverUid
         every { CommonOsUtils.getUid() } returns serverUid
         val unsafeField = sun.misc.Unsafe::class.java.getDeclaredField("theUnsafe")

@@ -136,8 +136,8 @@ public class ShizukuService extends Service<ShizukuUserServiceManager, ShizukuCl
     private static final int MAX_SERVER_LOGS = 100;
     private final ShizukuConfigManager configManager;
     private volatile int managerAppId;
-    // uid of the OTHER manager flavor (Plus vs Drop-In), if it's also installed; -1 if not. See
-    // isManagerAppId() - both flavors are the same signed codebase, so trusting either is safe.
+    // uid of the OTHER manager flavor (Plus vs Drop-In) when it is also installed and signed like
+    // the manager or by a trusted key; -1 otherwise. See ManagerFlavours and isManagerAppId().
     private volatile int secondaryManagerAppId;
     // uptimeMillis of the last on-demand manager-appId re-resolve (throttle; see checkCallerManagerPermission).
     private volatile long lastManagerAppIdRefresh;
@@ -208,6 +208,8 @@ public class ShizukuService extends Service<ShizukuUserServiceManager, ShizukuCl
             };
             for (String pkg : managerIds) {
                 if (pkg == null) continue;
+                // The other flavor's package only when it is signed like the manager.
+                if (!pkg.equals(MANAGER_APPLICATION_ID) && secondaryManagerAppId == -1) continue;
                 try {
                     Android17Compat.grantRuntimePermission(pkg, WRITE_SECURE_SETTINGS, userId);
                     Android17Compat.grantRuntimePermission(pkg, "android.permission.DUMP", userId);
@@ -322,11 +324,9 @@ public class ShizukuService extends Service<ShizukuUserServiceManager, ShizukuCl
         // ever picks ONE as MANAGER_APPLICATION_ID, so if the other flavor is also installed, its
         // clients would otherwise fail every checkCallerManagerPermission() check with "is not
         // manager" (SHIZUKUPLUS-7C) even though it's the developer's own signed app, not a third
-        // party. Track its uid too so isManagerAppId() can trust either.
-        String otherApplicationId = ServerConstants.DROPIN_APPLICATION_ID.equals(ServerConstants.MANAGER_APPLICATION_ID)
-                ? ServerConstants.PLUS_APPLICATION_ID : ServerConstants.DROPIN_APPLICATION_ID;
-        ApplicationInfo secondaryAi = Android17Compat.getApplicationInfo(otherApplicationId, 0, 0);
-        secondaryManagerAppId = secondaryAi != null ? secondaryAi.uid : -1;
+        // party. Track its uid too so isManagerAppId() can trust either, but only when it is signed
+        // like the manager: any app can be installed under the other flavor's package name.
+        secondaryManagerAppId = ManagerFlavours.secondaryManagerUid();
 
         configManager = getConfigManager();
         clientManager = getClientManager();
@@ -446,10 +446,8 @@ public class ShizukuService extends Service<ShizukuUserServiceManager, ShizukuCl
             ApplicationInfo primary = getManagerApplicationInfo();
             if (primary == null) return false;
             if (appId == UserHandleCompat.getAppId(primary.uid)) return true;
-            String otherApplicationId = ServerConstants.DROPIN_APPLICATION_ID.equals(ServerConstants.MANAGER_APPLICATION_ID)
-                    ? ServerConstants.PLUS_APPLICATION_ID : ServerConstants.DROPIN_APPLICATION_ID;
-            ApplicationInfo secondary = Android17Compat.getApplicationInfo(otherApplicationId, 0, 0);
-            return secondary != null && appId == UserHandleCompat.getAppId(secondary.uid);
+            int secondary = ManagerFlavours.secondaryManagerUid();
+            return secondary != -1 && appId == UserHandleCompat.getAppId(secondary);
         });
     }
 
@@ -492,12 +490,7 @@ public class ShizukuService extends Service<ShizukuUserServiceManager, ShizukuCl
             return false;
         }
         managerAppId = ai.uid;
-        String otherApplicationId = ServerConstants.DROPIN_APPLICATION_ID.equals(ServerConstants.MANAGER_APPLICATION_ID)
-                ? ServerConstants.PLUS_APPLICATION_ID : ServerConstants.DROPIN_APPLICATION_ID;
-        ApplicationInfo secondaryAi = Android17Compat.getApplicationInfo(otherApplicationId, 0, 0);
-        if (secondaryAi != null) {
-            secondaryManagerAppId = secondaryAi.uid;
-        }
+        secondaryManagerAppId = ManagerFlavours.secondaryManagerUid();
         LOGGER.i("Re-resolved manager appId=%d secondary=%d", managerAppId, secondaryManagerAppId);
         return true;
     }
@@ -610,10 +603,12 @@ public class ShizukuService extends Service<ShizukuUserServiceManager, ShizukuCl
             throw new SecurityException("Request package " + requestPackageName + "does not belong to uid " + callingUid);
         }
 
-        // Accept either manager flavor's applicationId - see secondaryManagerAppId's declaration.
-        isManager = MANAGER_APPLICATION_ID.equals(requestPackageName)
+        // Either manager flavor's applicationId, from a uid that is the manager: the other flavor
+        // counts only when signed like it - see secondaryManagerAppId's declaration.
+        isManager = (MANAGER_APPLICATION_ID.equals(requestPackageName)
                 || ServerConstants.DROPIN_APPLICATION_ID.equals(requestPackageName)
-                || ServerConstants.PLUS_APPLICATION_ID.equals(requestPackageName);
+                || ServerConstants.PLUS_APPLICATION_ID.equals(requestPackageName))
+                && checkCallerManagerPermission("attachApplication", callingUid, callingPid);
 
         if (isManager) {
             grantManagerEssentialPermissions();
