@@ -3,12 +3,14 @@ package rikka.shizuku.server;
 import android.os.SystemClock;
 import android.system.ErrnoException;
 import android.system.Os;
+import android.system.OsConstants;
 
 import androidx.annotation.Nullable;
 import androidx.annotation.VisibleForTesting;
 
 import java.io.Closeable;
 import java.io.File;
+import java.io.FileDescriptor;
 import java.io.IOException;
 import java.io.RandomAccessFile;
 import java.nio.channels.FileLock;
@@ -35,8 +37,16 @@ public final class SingleInstanceGuard {
 
     private static final Logger LOGGER = new Logger("SingleInstanceGuard");
 
-    /** How long a new server waits for one the starter has just killed to finish dying. */
-    static final long WAIT_MS = 5_000;
+    /**
+     * How long a new server waits for one the starter has just killed to finish dying. The kernel
+     * frees the lock only once the killed process leaves the kernel, which a process stuck in
+     * uninterruptible I/O can delay by seconds; a new server that gave up then would leave none
+     * running, and nothing restarts it. A server that is really still running keeps the lock for
+     * good, and the one waiting has touched nothing, so waiting longer costs only an idle
+     * process. 30 s leaves a server that gets the lock late the rest of the manager's 90 s
+     * start-up timeout (ShizukuStateMachine.STARTING_TIMEOUT_MS) to come up.
+     */
+    static final long WAIT_MS = 30_000;
     static final long RETRY_MS = 100;
 
     private static final String LOCK_NAME = "shizuku_plus_server.lock";
@@ -71,6 +81,7 @@ public final class SingleInstanceGuard {
      */
     public static boolean acquireForProcess() {
         String path = lockFile().getAbsolutePath();
+        createShared(path);
         Closeable guard = acquire(FILE_LOCK, SYSTEM_CLOCK, path, WAIT_MS, RETRY_MS);
         if (guard == null) {
             return false;
@@ -124,10 +135,37 @@ public final class SingleInstanceGuard {
         return new File("/data/local/tmp", LOCK_NAME);
     }
 
+    /**
+     * Creates the lock file once, before the first attempt, with its final mode so it never exists
+     * with wider bits; each attempt then opens the existing file. A root server creates it as
+     * root; a shell server started later must still open it, or it would run unguarded. Same bits
+     * as the config file: owner and group shell read and write (set again because the umask can
+     * clear the group bits at creation).
+     */
+    private static void createShared(String path) {
+        FileDescriptor fd;
+        try {
+            fd = Os.open(path, OsConstants.O_RDWR | OsConstants.O_CREAT | OsConstants.O_CLOEXEC, 0660);
+        } catch (ErrnoException | RuntimeException e) {
+            // The lock attempt reports it.
+            return;
+        }
+        try {
+            Os.fchmod(fd, 0660);
+            Os.fchown(fd, -1, android.os.Process.SHELL_UID);
+        } catch (ErrnoException | RuntimeException ignored) {
+            // Not the owner (a shell server opening root's file): the bits are already set.
+        } finally {
+            try {
+                Os.close(fd);
+            } catch (ErrnoException | RuntimeException ignored) {
+            }
+        }
+    }
+
     private static final Lock FILE_LOCK = path -> {
         RandomAccessFile file = new RandomAccessFile(path, "rw");
         try {
-            shareWithShell(path);
             FileLock lock = file.getChannel().tryLock();
             if (lock == null) {
                 file.close();
@@ -142,19 +180,6 @@ public final class SingleInstanceGuard {
             throw e;
         }
     };
-
-    /**
-     * A root server creates the file as root; a shell server started later must still open it, or
-     * it would run unguarded. Same bits as the config file: owner and group shell read and write.
-     */
-    private static void shareWithShell(String path) {
-        try {
-            Os.chmod(path, 0660);
-            Os.chown(path, -1, android.os.Process.SHELL_UID);
-        } catch (ErrnoException | RuntimeException ignored) {
-            // Not the owner (a shell server opening root's file): the bits are already set.
-        }
-    }
 
     private static final Clock SYSTEM_CLOCK = new Clock() {
         @Override

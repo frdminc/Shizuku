@@ -88,6 +88,21 @@ class SingleInstanceGuardTest {
     }
 
     @Test
+    fun `the second start of a restart pair waits out an old server that is slow to die`() {
+        // Two starts close together: the second starter kills the first one's new server, which
+        // was still waiting, and the old server it killed is stuck in uninterruptible I/O for some
+        // seconds before the kernel can free its lock. The second new server must still take the
+        // lock when the old one finally dies, not give up and leave the device with no server.
+        val old = acquire()!!
+        clock.due += 8_000L to { old.close() }
+
+        val second = SingleInstanceGuard.acquire(locks, clock, path, SingleInstanceGuard.WAIT_MS, SingleInstanceGuard.RETRY_MS)
+
+        assertNotNull(second)
+        assertTrue(clock.now in 8_000L..8_100L, "took it at ${clock.now} ms")
+    }
+
+    @Test
     fun `a lock that fails for another reason is not retried as contention`() {
         val broken =
             object : SingleInstanceGuard.Lock {
