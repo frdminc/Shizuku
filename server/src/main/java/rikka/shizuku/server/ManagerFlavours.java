@@ -27,7 +27,7 @@ final class ManagerFlavours {
 
     private static final Logger LOGGER = new Logger("ManagerFlavours");
 
-    /** Start-up lookups of the Plus package before the server gives up. */
+    /** Start-up lookups of both flavours before the server gives up. */
     static final int START_UP_ATTEMPTS = 5;
     static final long START_UP_RETRY_MS = 1_000;
 
@@ -40,30 +40,34 @@ final class ManagerFlavours {
      * lookup that fails leaves the manager unchanged and is tried again later, so a package
      * manager that does not answer for a moment never makes another package name the manager.
      *
-     * <p>Plus when its package is found. The Drop-In id only when Plus is not found and the
-     * Drop-In APK is the one this server was started from ({@code classPath}, the APK the starter
-     * ran: the manager's own path, or {@code pm path}), which is the Drop-In-only install. When
-     * neither holds, the Plus lookup is retried a few times, then the server gives up rather than
-     * guess.
+     * <p>The manager is the installed flavour whose APK started this server: {@code classPath}, the
+     * APK the starter ran (the manager's own sourceDir, passed with --apk, or else the base.apk
+     * beside the starter or {@code pm path}), equals its sourceDir. A package name alone decides
+     * nothing: any app can be installed under the name of a flavour that is absent. When neither
+     * flavour matches, the lookups are retried a few times for a package manager still coming up,
+     * then the server gives up rather than guess.
      *
-     * @return false when no manager was found; the server then exits
+     * @return false when no installed flavour started the server; the server then exits
      */
     static boolean chooseAtStartUp(@Nullable String classPath) {
+        if (classPath == null || classPath.isEmpty()) {
+            LOGGER.w("no class path; cannot tell which manager started the server");
+            return false;
+        }
+        String[] flavours = {ServerConstants.PLUS_APPLICATION_ID, ServerConstants.DROPIN_APPLICATION_ID};
         for (int attempt = 0; attempt < START_UP_ATTEMPTS; attempt++) {
             if (attempt > 0) {
                 SystemClock.sleep(START_UP_RETRY_MS);
             }
-            if (lookUp(ServerConstants.PLUS_APPLICATION_ID) != null) {
-                ServerConstants.MANAGER_APPLICATION_ID = ServerConstants.PLUS_APPLICATION_ID;
-                return true;
+            for (String flavour : flavours) {
+                ApplicationInfo ai = lookUp(flavour);
+                if (ai != null && (classPath.equals(ai.sourceDir) || classPath.equals(ai.publicSourceDir))) {
+                    ServerConstants.MANAGER_APPLICATION_ID = flavour;
+                    return true;
+                }
             }
-            ApplicationInfo dropin = lookUp(ServerConstants.DROPIN_APPLICATION_ID);
-            if (dropin != null && classPath != null
-                    && (classPath.equals(dropin.sourceDir) || classPath.equals(dropin.publicSourceDir))) {
-                ServerConstants.MANAGER_APPLICATION_ID = ServerConstants.DROPIN_APPLICATION_ID;
-                return true;
-            }
-            LOGGER.w("manager not found (attempt %d of %d)", attempt + 1, START_UP_ATTEMPTS);
+            LOGGER.w("no installed manager has the APK %s that started the server (attempt %d of %d)",
+                    classPath, attempt + 1, START_UP_ATTEMPTS);
         }
         return false;
     }

@@ -304,6 +304,51 @@ class PermissionDefinerConsentTest {
     }
 
     @Test
+    fun `when the Drop-In APK started the server a package under the Plus name is not the manager`() {
+        // Drop-In started the server and is signed by the manager's key; a package installed
+        // under the Plus name is signed by another key.
+        every { Android17Compat.getApplicationInfo(OTHER_FLAVOUR_PACKAGE, any(), any()) } returns
+            ApplicationInfo().apply { uid = OTHER_FLAVOUR_UID; sourceDir = DROPIN_APK }
+        every { Android17Compat.getPackageInfo(OTHER_FLAVOUR_PACKAGE, any(), 0) } returns
+            PackageInfo().apply {
+                packageName = OTHER_FLAVOUR_PACKAGE
+                applicationInfo = ApplicationInfo().apply {
+                    uid = OTHER_FLAVOUR_UID
+                    flags = ApplicationInfo.FLAG_INSTALLED
+                }
+                signatures = signedBy(OURS)
+            }
+        every { Android17Compat.getApplicationInfo(MANAGER_PACKAGE, any(), any()) } returns
+            ApplicationInfo().apply { uid = MANAGER_UID; sourceDir = "/data/app/other/base.apk" }
+        every { Android17Compat.getPackageInfo(MANAGER_PACKAGE, any(), 0) } returns
+            PackageInfo().apply {
+                packageName = MANAGER_PACKAGE
+                applicationInfo = ApplicationInfo().apply {
+                    uid = MANAGER_UID
+                    flags = ApplicationInfo.FLAG_INSTALLED
+                }
+                signatures = signedBy(THEIRS)
+            }
+        mockkStatic(SystemClock::class)
+        every { SystemClock.uptimeMillis() } returns 60_000L
+
+        assertTrue(ManagerFlavours.chooseAtStartUp(DROPIN_APK))
+        assertEquals(OTHER_FLAVOUR_PACKAGE, ServerConstants.MANAGER_APPLICATION_ID)
+        for (serverUid in serverUids) {
+            val service = newService(serverUid)
+            // As the constructor resolves them after the choice.
+            setField(ShizukuService::class.java, service, "managerAppId", OTHER_FLAVOUR_UID)
+            setField(ShizukuService::class.java, service, "secondaryManagerAppId", ManagerFlavours.secondaryManagerUid())
+            assertFalse(service.checkCallerManagerPermission("exit", MANAGER_UID, MANAGER_PID), "server uid $serverUid")
+            attach(service, MANAGER_PACKAGE, MANAGER_UID, MANAGER_PID)
+            attach(service, OTHER_FLAVOUR_PACKAGE, OTHER_FLAVOUR_UID, OTHER_FLAVOUR_PID)
+            assertTrue(service.checkCallerManagerPermission("exit", OTHER_FLAVOUR_UID, OTHER_FLAVOUR_PID))
+        }
+        verify(exactly = 0) { Android17Compat.grantRuntimePermission(MANAGER_PACKAGE, any(), any()) }
+        verify { Android17Compat.grantRuntimePermission(OTHER_FLAVOUR_PACKAGE, android.Manifest.permission.WRITE_SECURE_SETTINGS, any()) }
+    }
+
+    @Test
     fun `a permission the other flavour's package defines counts only when the manager's key signs it`() {
         every { Android17Compat.getPackageInfo(APP_PACKAGE, any(), any()) } returns
             PackageInfo().apply { requestedPermissions = heldPermissionNames }
@@ -498,5 +543,6 @@ class PermissionDefinerConsentTest {
         const val OTHER_FLAVOUR_PID = 8_888
         const val OURS: Byte = 1
         const val THEIRS: Byte = 2
+        const val DROPIN_APK = "/data/app/dropin/base.apk"
     }
 }

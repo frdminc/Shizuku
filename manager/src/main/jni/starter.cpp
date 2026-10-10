@@ -297,6 +297,35 @@ int main(int argc, char *argv[]) {
         fflush(stdout);
     }
 
+    // Started without --apk= (by hand, or by ops tooling): use the APK this starter ships in. It
+    // runs from that APK's native library directory, <codePath>/lib/<abi>/libshizuku.so, beside
+    // <codePath>/base.apk. `pm path` below asks for a package by name, which would start the
+    // server from whatever app holds the other flavour's name.
+    if (apk_path.empty()) {
+        char exe[PATH_MAX]{0};
+        ssize_t n = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
+        if (n > 0) {
+            exe[n] = '\0';
+            std::string dir(exe);
+            for (int i = 0; i < 3 && !dir.empty(); ++i) {
+                if (i == 2 && dir.size() > 4 && dir.compare(dir.size() - 4, 4, "/lib") != 0) {
+                    dir.clear();
+                    break;
+                }
+                auto slash = dir.rfind('/');
+                dir = slash == std::string::npos ? std::string() : dir.substr(0, slash);
+            }
+            if (!dir.empty()) {
+                std::string base = dir + "/base.apk";
+                if (access(base.c_str(), R_OK) == 0) {
+                    apk_path = base;
+                    printf("info: use apk path beside the starter\n");
+                    fflush(stdout);
+                }
+            }
+        }
+    }
+
     if (apk_path.empty()) {
         for (const char *pkg : {PACKAGE_NAME, PACKAGE_NAME_DROPIN}) {
             std::string cmd = std::string("pm path ") + pkg;

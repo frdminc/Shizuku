@@ -31,10 +31,9 @@ class ManagerFlavoursTest {
     }
 
     @Test
-    fun `start-up chooses Plus when its package is found`() {
+    fun `start-up chooses Plus when the Plus APK started the server`() {
         installed(ServerConstants.PLUS_APPLICATION_ID, PLUS_APK)
-        installed(ServerConstants.DROPIN_APPLICATION_ID, DROPIN_APK)
-        assertTrue(ManagerFlavours.chooseAtStartUp(DROPIN_APK))
+        assertTrue(ManagerFlavours.chooseAtStartUp(PLUS_APK))
         assertEquals(ServerConstants.PLUS_APPLICATION_ID, ServerConstants.MANAGER_APPLICATION_ID)
     }
 
@@ -71,6 +70,32 @@ class ManagerFlavoursTest {
     @Test
     fun `start-up gives up when no manager is found`() {
         assertFalse(ManagerFlavours.chooseAtStartUp(PLUS_APK))
+    }
+
+    @Test
+    fun `start-up chooses the flavour whose APK started the server, not Plus by name`() {
+        // The Drop-In APK started the server; a package under the Plus name is also installed.
+        installed(ServerConstants.PLUS_APPLICATION_ID, "/data/app/other/base.apk")
+        installed(ServerConstants.DROPIN_APPLICATION_ID, DROPIN_APK)
+        assertTrue(ManagerFlavours.chooseAtStartUp(DROPIN_APK))
+        assertEquals(ServerConstants.DROPIN_APPLICATION_ID, ServerConstants.MANAGER_APPLICATION_ID)
+        assertEquals(ServerConstants.PLUS_APPLICATION_ID, ManagerFlavours.otherApplicationId())
+    }
+
+    @Test
+    fun `start-up promotes nothing when the APK that started the server is neither flavour`() {
+        installed(ServerConstants.PLUS_APPLICATION_ID, PLUS_APK)
+        installed(ServerConstants.DROPIN_APPLICATION_ID, DROPIN_APK)
+        assertFalse(ManagerFlavours.chooseAtStartUp("/data/local/tmp/copy.apk"))
+        assertEquals(ServerConstants.PLUS_APPLICATION_ID, ServerConstants.MANAGER_APPLICATION_ID)
+    }
+
+    @Test
+    fun `start-up from the Plus APK chooses Plus with Drop-In also installed`() {
+        installed(ServerConstants.PLUS_APPLICATION_ID, PLUS_APK)
+        installed(ServerConstants.DROPIN_APPLICATION_ID, DROPIN_APK)
+        assertTrue(ManagerFlavours.chooseAtStartUp(PLUS_APK))
+        assertEquals(ServerConstants.PLUS_APPLICATION_ID, ServerConstants.MANAGER_APPLICATION_ID)
     }
 
     private fun installed(packageName: String, apk: String) {

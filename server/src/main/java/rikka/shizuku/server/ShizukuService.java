@@ -97,7 +97,7 @@ public class ShizukuService extends Service<ShizukuUserServiceManager, ShizukuCl
         // Before the config is loaded: its start-up import already asks who the manager is.
         waitSystemService("package");
         if (!ManagerFlavours.chooseAtStartUp(System.getProperty("java.class.path"))) {
-            LOGGER.w("manager app not found in user 0, exiting...");
+            LOGGER.e("no installed manager app in user 0 started this server, exiting...");
             System.exit(ServerConstants.MANAGER_APP_NOT_FOUND);
             return;
         }
