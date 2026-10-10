@@ -6,6 +6,7 @@ All notable changes to ShizukuPlus are documented here. See [AI_ATTRIBUTIONS.md]
 
 ### 🔒 Security
 - **Root mode now asks before granting Shizuku access, exactly like ADB mode** — since ShizukuPlus e3b2f7f2 the server marked every app that attached as allowed whenever it ran as root (uid 0), so in root mode any installed app that bundled the Shizuku client got full privileged access with no dialog. That auto-grant is removed: an app with no grant now gets the usual permission dialog when it requests access, and Deny works as in ADB mode. **Behaviour change for root users:** apps that only ever had the silent root grant (it was never saved) will show the permission dialog once after updating; grants you already approved in the dialog, grants held as the Shizuku runtime permission, and apps covered by the trusted signer allowlist keep working without a new prompt. Same fix as SnakyGD/ShizukuPlus-RootConsent.
+- **An app re-signed with a different key loses its Shizuku grant** — each grant now remembers the signing certificate of the app it was given to. If an app is reinstalled signed by a different key (one with no key-rotation lineage back to the old one), the next time the Shizuku server starts it removes that app's grant and its Shizuku permission, and the app has to be granted access again. Apps updated normally, or whose developer rotated their key with Android's signing lineage, are not affected. This check needs Android 9 or later.
 
 ---
 

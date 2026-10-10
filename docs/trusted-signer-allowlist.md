@@ -1,6 +1,6 @@
 # Trusted signer allowlist — permanent Shizuku access for your own apps
 
-Last updated: **2026-10-03**
+Last updated: **2026-10-10**
 
 ## The problem this solves
 
@@ -22,8 +22,12 @@ Since r2851 the same pass also compares signers: each entry stores the SHA-256
 digests of its packages' signing certificates (`signers`, written when the grant
 is recorded; an older entry is given the current ones on its first reconcile),
 and the entry is dropped when the uid's installed packages share none of them
-(`GrantSigners.revoked`). An unreadable or incomplete signer read keeps the
-grant, and a rotated signing key still matches through its lineage.
+(`GrantSigners.revoked`), and any Shizuku API runtime permission they hold is
+revoked with it, so the same start does not import the grant again. An
+unreadable or incomplete package or signer read keeps the entry but does not
+honour it until a later lookup confirms it, and a rotated signing key still
+matches through its lineage. Signers are recorded only on Android 9 (API 28)
+and later, so this check does not protect grants on Android 7-8.1 (API 24-27).
 
 In practice this means an app's Shizuku permission can silently disappear
 with **no user-visible cause** — not just on uninstall/reinstall (which is
