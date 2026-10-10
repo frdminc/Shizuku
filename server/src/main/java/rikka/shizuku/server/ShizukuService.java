@@ -86,6 +86,14 @@ public class ShizukuService extends Service<ShizukuUserServiceManager, ShizukuCl
 
     public static void main(String[] args) {
         DdmHandleAppName.setAppName("shizuku_plus_server", 0);
+        // Before the config is loaded or a binder registered: two starters running close together
+        // (the watchdog's and one from outside the app) could each start a server, and both would
+        // then rewrite the same config file. The second one leaves here instead.
+        if (!SingleInstanceGuard.acquireForProcess()) {
+            LOGGER.w("another shizuku_plus_server holds the single-instance guard; pid %d exits", android.os.Process.myPid());
+            System.exit(0);
+            return;
+        }
         RishConfig.setLibraryPath(System.getProperty("shizuku.library.path"));
 
         Looper.prepareMainLooper();
