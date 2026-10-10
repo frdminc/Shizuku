@@ -50,6 +50,8 @@ class GrantReconcileTest {
         every { PackageManagerApis.getPackagesForUid(APP_UID) } returns arrayOf(APP_PACKAGE)
         every { PackageManagerApis.getPackagesForUidNoThrow(APP_UID) } returns listOf(APP_PACKAGE)
         every { ShizukuConfigManager.currentSigners(APP_UID, any()) } returns listOf(OURS)
+        // As on Android 9 and later, where signers are read; the JVM's android.jar reports SDK_INT 0.
+        every { ShizukuConfigManager.signersReadable() } returns true
         every { Android17Compat.checkPermission(any<String>(), any<Int>()) } returns PackageManager.PERMISSION_DENIED
         every { Android17Compat.getPackageInfo(any(), any(), any()) } returns null
         every { Android17Compat.getPackageInfo(APP_PACKAGE, any(), 0) } answers {
@@ -215,6 +217,47 @@ class GrantReconcileTest {
         assertTrue(allowed(manager))
         assertEquals(listOf(OURS), stored.packages.single().signers)
         verify(exactly = 0) { Android17Compat.revokeRuntimePermission(any(), any(), any()) }
+    }
+
+    @Test
+    fun `an operator grant that lands while a removed grant is being revoked keeps its permission`() {
+        grant()
+        installed = listOf(app(ServerConstants.PERMISSION_ORIGINAL))
+        every { ShizukuConfigManager.currentSigners(APP_UID, any()) } returns null
+        val manager = start()
+        assertFalse(allowed(manager))
+
+        every { ShizukuConfigManager.currentSigners(APP_UID, any()) } returns listOf(THEIRS)
+        every { Android17Compat.checkPermission(ServerConstants.PERMISSION_ORIGINAL, APP_UID) } returns PackageManager.PERMISSION_GRANTED
+        // The operator allows the uid again just after the recheck removed its grant, before the
+        // revoke of the permissions it held has run.
+        var operatorAllowed = false
+        every { Android17Compat.getPackageInfo(APP_PACKAGE, any(), 0) } answers {
+            if (!operatorAllowed) {
+                operatorAllowed = true
+                manager.update(APP_UID, listOf(APP_PACKAGE), ConfigManager.MASK_PERMISSION, ConfigManager.FLAG_ALLOWED)
+            }
+            installed.firstOrNull { it.packageName == APP_PACKAGE }
+        }
+        now += RECHECK_AFTER
+        manager.find(APP_UID)
+
+        assertTrue(operatorAllowed)
+        assertTrue(allowed(manager), "the operator's grant stands")
+        verify(exactly = 0) { Android17Compat.revokeRuntimePermission(any(), any(), any()) }
+    }
+
+    @Test
+    fun `below Android 9 a grant that recorded signers is kept and honoured`() {
+        // The JVM's android.jar reports SDK_INT 0, so the real signer read answers "unknown" here
+        // as it does on Android 7 and 8, where it never reads signers.
+        grant()
+        every { ShizukuConfigManager.signersReadable() } answers { callOriginal() }
+        every { ShizukuConfigManager.currentSigners(APP_UID, any()) } answers { callOriginal() }
+        val manager = start()
+        assertTrue(allowed(manager))
+        assertEquals(listOf(APP_UID), manager.allowedUids)
+        assertEquals(listOf(OURS), stored.packages.single().signers)
     }
 
     private fun grant(packages: List<String> = listOf(APP_PACKAGE), signers: List<String>? = listOf(OURS)) {

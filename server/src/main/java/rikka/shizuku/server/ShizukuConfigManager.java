@@ -311,9 +311,14 @@ public class ShizukuConfigManager extends ConfigManager {
 
     /**
      * The stored entry for {@code uid}. A grant start-up could not check is kept but withheld
-     * (returned without its permission flags, so neither it nor a held runtime permission's
-     * fallback counts) until a check here, at most one per {@link #RECHECK_INTERVAL} per uid,
-     * confirms it; a check that finds other packages or another signer removes it.
+     * (returned without its permission flags, so neither it nor the held-permission fallback of
+     * getFlagsForUid counts) until a check here, at most one per {@link #RECHECK_INTERVAL} per
+     * uid, confirms it; a check that finds other packages or another signer removes it.
+     *
+     * <p>Withholding covers the stored grant only. The caller permission check reads the runtime
+     * permission from the OS on its own and still counts it: the OS clears that grant when the
+     * package is uninstalled, and a package signed by another key cannot be installed over one
+     * that keeps it.
      */
     @Nullable
     private ShizukuConfig.PackageEntry storedEntry(int uid) {
@@ -354,9 +359,29 @@ public class ShizukuConfigManager extends ConfigManager {
             removeLocked(uid);
         }
         if (result == Check.SIGNER_CHANGED) {
-            revokeApiPermissions(uid, packages);
+            revokeUnlessAllowedAgain(uid, packages);
         }
         return null;
+    }
+
+    /**
+     * {@link #revokeApiPermissions} for a grant removed after start-up. The operator can allow
+     * the uid again between the removal and the revoke, and the dialog grants the runtime
+     * permission right after storing that grant; revoking then would take it back. The held
+     * permissions are read first, outside the lock, then the revoke runs under the lock only
+     * while the uid still has no allowed entry, so a grant either lands first and stops it or
+     * waits for it to finish.
+     */
+    private void revokeUnlessAllowedAgain(int uid, List<String> packages) {
+        List<String[]> held = heldApiPermissions(uid, packages);
+        synchronized (this) {
+            ShizukuConfig.PackageEntry entry = findLocked(uid);
+            if (entry != null && entry.isAllowed()) {
+                LOGGER.i("uid %d was allowed again; not revoking its API permissions", uid);
+                return;
+            }
+            revoke(uid, held);
+        }
     }
 
     private static ShizukuConfig.PackageEntry withheld(ShizukuConfig.PackageEntry entry) {
@@ -428,7 +453,10 @@ public class ShizukuConfigManager extends ConfigManager {
         }
         boolean recorded = entry.signers != null && !entry.signers.isEmpty();
         boolean known = signers != null && !signers.isEmpty();
-        if (recorded && !known) {
+        // Below Android 9 the signers are never read, so recorded ones (an entry carried over from
+        // a newer release of Android) have nothing to be compared with: kept, as for an entry that
+        // recorded none.
+        if (recorded && !known && signersReadable()) {
             LOGGER.w("cannot read the signers of uid %d; keeping its config, unconfirmed", uid);
             return Check.UNKNOWN;
         }
@@ -464,6 +492,12 @@ public class ShizukuConfigManager extends ConfigManager {
      * straight back. Failures are logged, never thrown.
      */
     private static void revokeApiPermissions(int uid, List<String> packages) {
+        revoke(uid, heldApiPermissions(uid, packages));
+    }
+
+    /** The {package, permission} pairs of the Shizuku API permissions {@code packages} hold. */
+    private static List<String[]> heldApiPermissions(int uid, List<String> packages) {
+        List<String[]> held = new ArrayList<>();
         int userId = UserHandleCompat.getUserId(uid);
         for (String packageName : packages) {
             PackageInfo pi;
@@ -481,16 +515,34 @@ public class ShizukuConfigManager extends ConfigManager {
                     continue;
                 }
                 try {
-                    if (Android17Compat.checkPermission(permission, uid) != PackageManager.PERMISSION_GRANTED) {
-                        continue;
+                    if (Android17Compat.checkPermission(permission, uid) == PackageManager.PERMISSION_GRANTED) {
+                        held.add(new String[]{packageName, permission});
                     }
-                    Android17Compat.revokeRuntimePermission(packageName, permission, userId);
-                    LOGGER.i("revoked %s from %s (uid %d) with its grant", permission, packageName, uid);
                 } catch (Throwable t) {
-                    LOGGER.w(t, "revoking %s from %s failed", permission, packageName);
+                    LOGGER.w(t, "cannot tell whether %s holds %s", packageName, permission);
                 }
             }
         }
+        return held;
+    }
+
+    private static void revoke(int uid, List<String[]> held) {
+        int userId = UserHandleCompat.getUserId(uid);
+        for (String[] pair : held) {
+            String packageName = pair[0];
+            String permission = pair[1];
+            try {
+                Android17Compat.revokeRuntimePermission(packageName, permission, userId);
+                LOGGER.i("revoked %s from %s (uid %d) with its grant", permission, packageName, uid);
+            } catch (Throwable t) {
+                LOGGER.w(t, "revoking %s from %s failed", permission, packageName);
+            }
+        }
+    }
+
+    /** Signers are read on API 28 and later only; a seam, since tests run with SDK_INT 0. */
+    static boolean signersReadable() {
+        return Build.VERSION.SDK_INT >= Build.VERSION_CODES.P;
     }
 
     // A trusted signer is always allowed: a stored revoke or deny (including one written before

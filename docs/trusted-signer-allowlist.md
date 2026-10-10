@@ -26,8 +26,11 @@ and the entry is dropped when the uid's installed packages share none of them
 revoked with it, so the same start does not import the grant again. An
 unreadable or incomplete package or signer read keeps the entry but does not
 honour it until a later lookup confirms it, and a rotated signing key still
-matches through its lineage. Signers are recorded only on Android 9 (API 28)
-and later, so this check does not protect grants on Android 7-8.1 (API 24-27).
+matches through its lineage. Until then the manager's list shows that app as not
+authorised, although its grant is still stored. Signers are recorded only on
+Android 9 (API 28) and later, so this check does not protect grants on Android
+7-8.1 (API 24-27), where an entry that recorded signers on a newer release is
+kept and honoured as one that recorded none.
 
 In practice this means an app's Shizuku permission can silently disappear
 with **no user-visible cause** — not just on uninstall/reinstall (which is
