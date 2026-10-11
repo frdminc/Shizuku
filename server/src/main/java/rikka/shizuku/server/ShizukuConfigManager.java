@@ -8,9 +8,6 @@ import android.content.pm.PackageManager;
 import android.content.pm.Signature;
 import android.os.Build;
 import android.os.SystemClock;
-import android.system.ErrnoException;
-import android.system.Os;
-import android.util.AtomicFile;
 
 import androidx.annotation.Nullable;
 
@@ -18,10 +15,7 @@ import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 
 import java.io.File;
-import java.io.FileInputStream;
-import java.io.FileNotFoundException;
-import java.io.FileOutputStream;
-import java.io.IOException;
+import java.io.ByteArrayInputStream;
 import java.io.InputStreamReader;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -54,7 +48,7 @@ public class ShizukuConfigManager extends ConfigManager {
     private static final long WRITE_DELAY = 10 * 1000;
 
     private static final File FILE = getConfigFile();
-    private static final AtomicFile ATOMIC_FILE = new AtomicFile(FILE);
+    private static final SafeConfigFile CONFIG_FILE = new SafeConfigFile(FILE);
 
     private static File getConfigFile() {
         File shellFile = new File("/data/user_de/0/com.android.shell/shizuku.json");
@@ -71,63 +65,41 @@ public class ShizukuConfigManager extends ConfigManager {
     }
 
     public static ShizukuConfig load() {
-        FileInputStream stream;
+        byte[] bytes;
         try {
-            stream = ATOMIC_FILE.openRead();
-        } catch (FileNotFoundException e) {
-            LOGGER.i("no existing config file " + ATOMIC_FILE.getBaseFile() + "; starting empty");
+            bytes = CONFIG_FILE.read();
+        } catch (Throwable tr) {
+            LOGGER.e(tr, "load config");
+            return new ShizukuConfig();
+        }
+        if (bytes == null) {
+            LOGGER.i("no existing config file " + CONFIG_FILE.getPath() + "; starting empty");
             return new ShizukuConfig();
         }
 
         ShizukuConfig config = null;
         try {
-            config = GSON_IN.fromJson(new InputStreamReader(stream), ShizukuConfig.class);
+            config = GSON_IN.fromJson(new InputStreamReader(new ByteArrayInputStream(bytes)), ShizukuConfig.class);
         } catch (Throwable tr) {
             LOGGER.e(tr, "load config");
-        } finally {
-            try {
-                stream.close();
-            } catch (IOException e) {
-                LOGGER.w("failed to close: " + e);
-            }
         }
         if (config != null) return config;
         return new ShizukuConfig();
     }
 
     public static void write(ShizukuConfig config) {
-        synchronized (ATOMIC_FILE) {
-            FileOutputStream stream;
-            try {
-                stream = ATOMIC_FILE.startWrite();
-            } catch (IOException e) {
-                LOGGER.e("failed to write state: " + e);
-                return;
-            }
-
+        synchronized (CONFIG_FILE) {
+            // The config is written to a fresh file given mode 0660 and group shell through its
+            // descriptor, then renamed into place, never through a symbolic link (SafeConfigFile).
+            // Closing #419: the config file was previously world-readable/writable. Root bypasses
+            // DAC checks entirely, so it doesn't need explicit bits; only shell needs access,
+            // granted via group ownership.
             try {
                 String json = GSON_OUT.toJson(config);
-                stream.write(json.getBytes());
-
-                ATOMIC_FILE.finishWrite(stream);
-
-                // Closing #419: the config file was previously world-readable/writable.
-                // Root bypasses DAC checks entirely, so it doesn't need explicit bits here;
-                // only shell needs explicit access, granted via group ownership. No "other"
-                // access is needed, so we restrict to owner+group read/write only.
-                File file = ATOMIC_FILE.getBaseFile();
-                if (file.exists()) {
-                    try {
-                        Os.chmod(file.getAbsolutePath(), 0660);
-                        Os.chown(file.getAbsolutePath(), -1, android.os.Process.SHELL_UID);
-                    } catch (ErrnoException e) {
-                        LOGGER.w("failed to set permissions on " + file.getAbsolutePath() + ": " + e);
-                    }
-                }
-                LOGGER.v("config saved to " + file.getAbsolutePath());
+                CONFIG_FILE.write(json.getBytes());
+                LOGGER.v("config saved to " + CONFIG_FILE.getPath());
             } catch (Throwable tr) {
-                LOGGER.e(tr, "can't save %s, restoring backup.", ATOMIC_FILE.getBaseFile());
-                ATOMIC_FILE.failWrite(stream);
+                LOGGER.e(tr, "can't save %s; the previous config is kept.", CONFIG_FILE.getPath());
             }
         }
     }
