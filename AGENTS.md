@@ -40,6 +40,10 @@ the same rules. Jules has its own setup notes in [`JULES.md`](JULES.md).
 
 - **Release-signed build without CI:** `scripts/dev/build-release-local.sh [dropin|shizukuplus]`
   (signing secrets from the 1Password Service vault into a temp dir; installs over the fleet's app)
+- **Unit tests:** the manager has flavours, so name one: `:manager:testShizukuplusDebugUnitTest --tests '<class>'`
+  (bare `:manager:testDebugUnitTest` is ambiguous). JDK 21 is
+  `/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home`; `/usr/libexec/java_home -v 21`
+  returns JDK 27 on the build Mac, which fails. A fresh worktree needs `git submodule update --init api`.
 - **Entry activity:** `MainActivity` (NOT `HomeActivity` — that's abstract)
 - **Settings keys:** `manager/src/main/java/af/shizuku/manager/ShizukuSettings.java` inner class `Keys`
 - **Preference XML:** `manager/src/main/res/xml/settings_*.xml`
