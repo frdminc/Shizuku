@@ -22,6 +22,7 @@ import org.junit.jupiter.api.io.TempDir
 import rikka.hidden.compat.PackageManagerApis
 import rikka.hidden.compat.UserManagerApis
 import rikka.shizuku.server.ktx.workerHandler
+import java.io.IOException
 import java.nio.file.Path
 import java.util.Collections
 import java.util.concurrent.CountDownLatch
@@ -49,6 +50,10 @@ class ConfigWriteTimingTest {
     private var installed: List<PackageInfo> = emptyList()
     private val writes = mutableListOf<ShizukuConfig>()
     private var duringWrite: (() -> Unit)? = null
+    /** How many of the next writes fail, as a full disk would fail them. */
+    private var failWrites = 0
+    /** The clock at every write attempt, failed or not. */
+    private val attempts = mutableListOf<Long>()
 
     private var now = 0L
     private val queue = mutableListOf<Posted>()
@@ -76,6 +81,15 @@ class ConfigWriteTimingTest {
 
         every { ShizukuConfigManager.load() } returns stored
         every { ShizukuConfigManager.writeJson(any()) } answers {
+            attempts.add(now)
+            if (failWrites > 0) {
+                failWrites--
+                duringWrite?.let {
+                    duringWrite = null
+                    it()
+                }
+                throw IOException("No space left on device")
+            }
             writes.add(Gson().fromJson(firstArg<String>(), ShizukuConfig::class.java))
             duringWrite?.let {
                 duringWrite = null
@@ -278,6 +292,125 @@ class ConfigWriteTimingTest {
         assertTrue(queue.isEmpty(), "the worker still has a write waiting after the flush")
     }
 
+    // --- failed writes -------------------------------------------------------------------------
+
+    @Test
+    fun `a write that fails is tried again and the change reaches the disk`() {
+        // The real config file logic over a real directory, with the temp file failing to be
+        // created on the first attempt, as a full disk fails it.
+        val ops = SafeConfigFileTest.FaultyOps(SafeConfigFileTest.NioOps()).apply { failCreate = true }
+        val file = SafeConfigFile(dir.resolve("shizuku.json").toFile(), ops, 4242)
+        every { ShizukuConfigManager.writeJson(any()) } answers {
+            attempts.add(now)
+            file.write(firstArg<String>().toByteArray())
+        }
+        val manager = start()
+
+        manager.update(APP_UID, listOf(packageOf(APP_UID)), ConfigManager.MASK_PERMISSION, ConfigManager.FLAG_DENIED)
+        advance(0)
+        assertEquals(null, file.read(), "the failed write left something at the config's name")
+        ops.failCreate = false
+        advance(BATCH_DELAY)
+
+        assertEquals(2, attempts.size, "the failed write was not tried again, or was tried more than once")
+        val onDisk = Gson().fromJson(String(file.read()!!), ShizukuConfig::class.java)
+        assertEquals(ConfigManager.FLAG_DENIED, flagsOf(onDisk, APP_UID))
+        assertEquals(listOf("shizuku.json"), dir.toFile().list()!!.sorted(), "a temp file was left behind")
+        assertTrue(queue.isEmpty(), "a write is still waiting after the change was saved")
+    }
+
+    @Test
+    fun `an exit flush after a failed write writes the change`() {
+        val manager = start()
+        failWrites = 1
+
+        manager.update(APP_UID, listOf(packageOf(APP_UID)), ConfigManager.MASK_PERMISSION, ConfigManager.FLAG_DENIED)
+        advance(0)
+        assertTrue(writes.isEmpty())
+        manager.flushPendingWrite()
+
+        assertEquals(1, writes.size, "the exit flush found nothing waiting after the failed write")
+        assertEquals(ConfigManager.FLAG_DENIED, flagsOf(writes.single(), APP_UID))
+        advance(BATCH_DELAY)
+        assertEquals(1, writes.size, "the retry wrote again after the flush had saved the change")
+    }
+
+    @Test
+    fun `a change made while a write fails is written at once and the earlier change with it`() {
+        val manager = start()
+        failWrites = 1
+        duringWrite = {
+            manager.update(OTHER_UID, listOf(packageOf(OTHER_UID)), ConfigManager.MASK_PERMISSION, ConfigManager.FLAG_DENIED)
+        }
+
+        manager.update(APP_UID, listOf(packageOf(APP_UID)), ConfigManager.MASK_PERMISSION, ConfigManager.FLAG_ALLOWED)
+        advance(0)
+
+        assertEquals(listOf(0L, 0L), attempts, "the change made during the failed write waited for the retry")
+        assertEquals(1, writes.size)
+        assertEquals(ConfigManager.FLAG_ALLOWED, flagsOf(writes.single(), APP_UID))
+        assertEquals(ConfigManager.FLAG_DENIED, flagsOf(writes.single(), OTHER_UID))
+        advance(BATCH_DELAY)
+        assertEquals(1, writes.size, "a write ran again with nothing new")
+    }
+
+    @Test
+    fun `changes made while writes keep failing are all written once a write succeeds`() {
+        val manager = start()
+        failWrites = 3
+
+        manager.update(APP_UID, listOf(packageOf(APP_UID)), ConfigManager.MASK_PERMISSION, ConfigManager.FLAG_DENIED)
+        advance(0)
+        manager.update(OTHER_UID, listOf(packageOf(OTHER_UID)), ConfigManager.MASK_PERMISSION, ConfigManager.FLAG_ALLOWED)
+        advance(0)
+        manager.update(THIRD_UID, listOf(packageOf(THIRD_UID)), ConfigManager.MASK_PERMISSION, ConfigManager.FLAG_DENIED)
+        advance(BATCH_DELAY * 3)
+
+        assertEquals(4, attempts.size)
+        assertEquals(1, writes.size)
+        assertEquals(ConfigManager.FLAG_DENIED, flagsOf(writes.single(), APP_UID))
+        assertEquals(ConfigManager.FLAG_ALLOWED, flagsOf(writes.single(), OTHER_UID))
+        assertEquals(ConfigManager.FLAG_DENIED, flagsOf(writes.single(), THIRD_UID))
+        assertTrue(queue.isEmpty(), "a write is still waiting after every change was saved")
+    }
+
+    @Test
+    fun `writes that keep failing are tried again at a bounded rate`() {
+        val manager = start()
+        failWrites = Int.MAX_VALUE
+
+        manager.update(APP_UID, listOf(packageOf(APP_UID)), ConfigManager.MASK_PERMISSION, ConfigManager.FLAG_DENIED)
+        advance(MINUTE)
+
+        val gaps = attempts.zipWithNext { a, b -> b - a }
+        assertTrue(attempts.size >= 4, "the failed write was tried only ${attempts.size} times in a minute")
+        assertTrue(attempts.size <= 12, "the failed write was tried ${attempts.size} times in a minute: $attempts")
+        assertTrue(gaps.all { it >= 1_000 }, "attempts closer than a second apart: $attempts")
+        assertTrue(gaps.all { it <= BATCH_DELAY }, "attempts more than the batch delay apart: $attempts")
+        assertEquals(1, queue.size, "not exactly one retry waiting")
+    }
+
+    @Test
+    fun `a write that succeeds ends the failure streak`() {
+        val manager = start()
+        failWrites = 4
+
+        manager.update(APP_UID, listOf(packageOf(APP_UID)), ConfigManager.MASK_PERMISSION, ConfigManager.FLAG_DENIED)
+        advance(MINUTE)
+        assertEquals(1, writes.size)
+        attempts.clear()
+        failWrites = 1
+
+        manager.update(OTHER_UID, listOf(packageOf(OTHER_UID)), ConfigManager.MASK_PERMISSION, ConfigManager.FLAG_DENIED)
+        val first = now
+        advance(MINUTE)
+
+        assertEquals(2, attempts.size)
+        assertEquals(first, attempts[0])
+        assertEquals(FIRST_RETRY, attempts[1] - attempts[0], "the retry kept the earlier streak's longer wait")
+        assertEquals(2, writes.size)
+    }
+
     // --- exit ----------------------------------------------------------------------------------
 
     @Test
@@ -473,6 +606,9 @@ class ConfigWriteTimingTest {
         val OURS = "aa".repeat(32)
         const val APP_UID = 10_123
         const val OTHER_UID = 10_124
+        const val THIRD_UID = 10_125
+        const val MINUTE = 60_000L
+        const val FIRST_RETRY = 1_000L
         const val BATCH_DELAY = 10_000L
         const val SERVER_PID = 4242
         const val EXIT_BOUND = 150L

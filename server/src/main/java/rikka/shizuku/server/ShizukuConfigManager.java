@@ -17,6 +17,7 @@ import com.google.gson.GsonBuilder;
 
 import java.io.File;
 import java.io.ByteArrayInputStream;
+import java.io.IOException;
 import java.io.InputStreamReader;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -52,6 +53,12 @@ public class ShizukuConfigManager extends ConfigManager {
      * instead ({@link #scheduleWriteLocked(boolean)}).
      */
     private static final long WRITE_DELAY = 10 * 1000;
+
+    /**
+     * How long the first retry of a failed write waits. Each further failure in a row doubles
+     * it, up to {@link #WRITE_DELAY}.
+     */
+    private static final long RETRY_FIRST_DELAY = 1000;
 
     /** No write is waiting. */
     private static final int WRITE_NONE = 0;
@@ -100,19 +107,19 @@ public class ShizukuConfigManager extends ConfigManager {
         return new ShizukuConfig();
     }
 
-    /** Writes {@code json} as the config. Callers hold the CONFIG_FILE lock; a seam for tests. */
-    static void writeJson(String json) {
+    /**
+     * Writes {@code json} as the config. Callers hold the CONFIG_FILE lock; a seam for tests.
+     *
+     * @throws IOException the config was not saved; the previous one is kept
+     */
+    static void writeJson(String json) throws IOException {
         // The config is written to a fresh file given mode 0660 and group shell through its
         // descriptor, then renamed into place, never through a symbolic link (SafeConfigFile).
         // Closing #419: the config file was previously world-readable/writable. Root bypasses
         // DAC checks entirely, so it doesn't need explicit bits; only shell needs access,
         // granted via group ownership.
-        try {
-            CONFIG_FILE.write(json.getBytes());
-            LOGGER.v("config saved to " + CONFIG_FILE.getPath());
-        } catch (Throwable tr) {
-            LOGGER.e(tr, "can't save %s; the previous config is kept.", CONFIG_FILE.getPath());
-        }
+        CONFIG_FILE.write(json.getBytes());
+        LOGGER.v("config saved to " + CONFIG_FILE.getPath());
     }
 
     /**
@@ -128,6 +135,10 @@ public class ShizukuConfigManager extends ConfigManager {
      * which every change holds, and written under CONFIG_FILE's, held across both so that two
      * writes (the worker's and an exit's flush) cannot reach the disk in the other order. Nothing
      * takes CONFIG_FILE while holding this object's lock.
+     *
+     * <p>A write that fails leaves the change waiting and posts a retry
+     * ({@link #writeFailedLocked(Throwable)}), so the worker tries again and an exit's flush finds
+     * it waiting.
      */
     private void writePending() {
         synchronized (CONFIG_FILE) {
@@ -143,12 +154,57 @@ public class ShizukuConfigManager extends ConfigManager {
                 try {
                     json = GSON_OUT.toJson(config);
                 } catch (Throwable tr) {
-                    LOGGER.e(tr, "can't save %s; the previous config is kept.", CONFIG_FILE.getPath());
+                    writeFailedLocked(tr);
                     return;
                 }
             }
-            writeJson(json);
+            Throwable failure = null;
+            try {
+                writeJson(json);
+            } catch (Throwable tr) {
+                failure = tr;
+            }
+            synchronized (this) {
+                if (failure != null) {
+                    writeFailedLocked(failure);
+                } else if (writeFailures > 0) {
+                    LOGGER.i("config saved to %s after %d failed attempts", CONFIG_FILE.getPath(), writeFailures);
+                    writeFailures = 0;
+                }
+            }
         }
+    }
+
+    /**
+     * After a write that failed: the change waits again, and a retry is posted after
+     * {@link #retryDelay(int)}. A prompt write posted meanwhile (a change made during the write)
+     * is left to run as posted, and a delayed one is brought forward to the retry. The failure is
+     * logged once per run of failures, and the write that ends the run says so.
+     */
+    private void writeFailedLocked(Throwable failure) {
+        writeFailures++;
+        if (pendingWrite == WRITE_PROMPT) {
+            if (writeFailures == 1) {
+                LOGGER.e(failure, "can't save %s; the previous config is kept, trying again now",
+                        CONFIG_FILE.getPath());
+            }
+            return;
+        }
+        long delay = retryDelay(writeFailures);
+        if (writeFailures == 1) {
+            LOGGER.e(failure, "can't save %s; the previous config is kept, trying again in %d ms",
+                    CONFIG_FILE.getPath(), delay);
+        }
+        Handler handler = HandlerKt.getWorkerHandler();
+        handler.removeCallbacks(mWriteRunner);
+        handler.postDelayed(mWriteRunner, delay);
+        pendingWrite = WRITE_DELAYED;
+    }
+
+    /** {@link #RETRY_FIRST_DELAY}, doubled for each failure in a row after the first, at most {@link #WRITE_DELAY}. */
+    private static long retryDelay(int failures) {
+        int doublings = Math.min(Math.max(failures - 1, 0), 16);
+        return Math.min(WRITE_DELAY, RETRY_FIRST_DELAY << doublings);
     }
 
     private final Runnable mWriteRunner = new Runnable() {
@@ -163,6 +219,9 @@ public class ShizukuConfigManager extends ConfigManager {
 
     /** WRITE_NONE, WRITE_DELAYED or WRITE_PROMPT: the write posted to the worker, if any. */
     private int pendingWrite = WRITE_NONE;
+
+    /** Writes that failed in a row; 0 after one that succeeded. */
+    private int writeFailures = 0;
 
     /**
      * Uids whose stored grant start-up could not check against their packages and signers (a

@@ -459,7 +459,7 @@ class SafeConfigFileTest {
      * Fails chosen operations with an IOException, or stops at the n-th operation that changes the
      * directory as if the process died there (nothing after it runs).
      */
-    private class FaultyOps(private val ops: SafeConfigFile.Ops) : SafeConfigFile.Ops by ops {
+    internal class FaultyOps(private val ops: SafeConfigFile.Ops) : SafeConfigFile.Ops by ops {
         var failCreate = false
         var failRenameFrom: String? = null
         var failRenameTo: String? = null
