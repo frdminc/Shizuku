@@ -7,7 +7,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import rikka.shizuku.Shizuku
 import timber.log.Timber
-import java.io.File
 
 object DeviceOptimizer {
     private fun runCommand(cmd: String): Boolean {
@@ -80,17 +79,10 @@ object DeviceOptimizer {
             runCommand("appops set $pkgName GET_USAGE_STATS allow")
             runCommand("appops set $pkgName SCHEDULE_EXACT_ALARM allow")
 
-            // 5. Sync native starter binary to /data/local/tmp/shizuku
-            try {
-                val starterFile = File(context.applicationInfo.nativeLibraryDir, "libshizuku.so")
-                if (starterFile.exists()) {
-                    val tmpPath = "/data/local/tmp/shizuku"
-                    runCommand("cp ${starterFile.absolutePath} $tmpPath")
-                    runCommand("chmod 755 $tmpPath")
-                }
-            } catch (e: Exception) {
-                Timber.tag("DeviceOptimizer").w(e, "Failed to sync starter binary")
-            }
+            // 5. Remove the copy of the starter earlier versions kept at /data/local/tmp/shizuku.
+            // Nothing runs it, and the starter finds the manager's APK from beside itself in the
+            // app's native library directory.
+            runCommand("[ -f /data/local/tmp/shizuku ] && rm -f /data/local/tmp/shizuku")
 
             true
         }

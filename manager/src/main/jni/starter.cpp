@@ -297,10 +297,9 @@ int main(int argc, char *argv[]) {
         fflush(stdout);
     }
 
-    // Started without --apk= (by hand, or by ops tooling): use the APK this starter ships in. It
-    // runs from that APK's native library directory, <codePath>/lib/<abi>/libshizuku.so, beside
-    // <codePath>/base.apk. `pm path` below asks for a package by name, which would start the
-    // server from whatever app holds the other flavour's name.
+    // Without --apk= (started by hand, or by ops tooling) the starter uses the base.apk beside it:
+    // it runs from that APK's native library directory, <codePath>/lib/<abi>/libshizuku.so, next
+    // to <codePath>/base.apk. Only when it runs from elsewhere does it ask `pm path`.
     if (apk_path.empty()) {
         char exe[PATH_MAX]{0};
         ssize_t n = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
@@ -308,7 +307,7 @@ int main(int argc, char *argv[]) {
             exe[n] = '\0';
             std::string dir(exe);
             for (int i = 0; i < 3 && !dir.empty(); ++i) {
-                if (i == 2 && dir.size() > 4 && dir.compare(dir.size() - 4, 4, "/lib") != 0) {
+                if (i == 2 && (dir.size() < 4 || dir.compare(dir.size() - 4, 4, "/lib") != 0)) {
                     dir.clear();
                     break;
                 }
@@ -326,7 +325,10 @@ int main(int argc, char *argv[]) {
         }
     }
 
+    // `pm path` names one flavour only when one is installed; with both, the starter cannot tell
+    // which one it belongs to and asks for --apk= instead.
     if (apk_path.empty()) {
+        int found = 0;
         for (const char *pkg : {PACKAGE_NAME, PACKAGE_NAME_DROPIN}) {
             std::string cmd = std::string("pm path ") + pkg;
             auto f = popen(cmd.c_str(), "r");
@@ -335,10 +337,14 @@ int main(int argc, char *argv[]) {
             fgets(line, PATH_MAX, f);
             trim(line);
             if (strstr(line, "package:") == line) {
-                apk_path = line + strlen("package:");
+                if (found++ == 0) apk_path = line + strlen("package:");
             }
             pclose(f);
-            if (!apk_path.empty()) break;
+        }
+        if (found > 1) {
+            perrorf("fatal: both %s and %s are installed; pass --apk=<path of the manager's base.apk>\n",
+                    PACKAGE_NAME, PACKAGE_NAME_DROPIN);
+            exit(EXIT_FATAL_PM_PATH);
         }
     }
 
