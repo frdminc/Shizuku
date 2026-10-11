@@ -243,62 +243,106 @@ public class ShizukuService extends Service<ShizukuUserServiceManager, ShizukuCl
 
     private void disablePhantomProcessKiller() {
         if (Build.VERSION.SDK_INT < 31) return; // Only needed on Android 12+
-        try {
-            int userId = UserHandleCompat.getUserId(android.os.Process.myUid());
+        int uid = android.os.Process.myUid();
+        if (uid != 0 && uid != 2000) {
+            LOGGER.i("phantom killer: skipped (requires root or shell uid)");
+            return;
+        }
 
-            // 1. Disable phantom-process monitor (Android 13+) via settings ContentProvider.
-            //    This replaces `settings put global settings_enable_monitor_phantom_procs false`
-            //    which exec()s a shell and fails silently on Samsung SELinux.
-            IContentProvider settingsProvider = ActivityManagerApis.getContentProviderExternal(
-                    "settings", userId, null, "com.android.shell");
+        // Match SettingsService's attribution; a null package fails AppOps.checkPackage.
+        String callingPackage = uid == 0 ? "root" : "com.android.shell";
+        IContentProvider settingsProvider = null;
+        try {
+            // app_process has no AMS application record: DeviceConfig's ContentResolver
+            // cannot acquire this provider. Use the external-provider protocol instead.
+            settingsProvider = ActivityManagerApis.getContentProviderExternal(
+                    "settings", 0, null, "com.android.shell");
+            if (settingsProvider == null) {
+                LOGGER.i("phantom killer: skipped (settings provider unavailable)");
+                return;
+            }
+
+            // Android 12L+ checks this flag for both count trimming and phantom CPU kills.
+            // Settings.Global takes precedence over the SELinux-restricted system property.
+            if (Build.VERSION.SDK_INT >= 32) {
+                try {
+                    if (putPhantomProcessSetting(settingsProvider, callingPackage, "global",
+                            "settings_enable_monitor_phantom_procs", "false")) {
+                        LOGGER.i("phantom killer: monitor disabled");
+                        return; // No need to disable DeviceConfig sync device-wide.
+                    }
+                    LOGGER.i("phantom killer: monitor setting unavailable (readback mismatch)");
+                } catch (Exception e) {
+                    logPhantomProcessFailure("monitor setting", e);
+                }
+            }
+
+            // Android 12 (or a rejected monitor setting): prevent count-based trimming.
+            // ActivityManagerConstants reads activity_manager, NOT activity_manager_native_boot.
+            // Keep DeviceConfig types out of this class's bytecode for pre-29 ART (#527).
+            try {
+                if (!putPhantomProcessSetting(settingsProvider, callingPackage, "config",
+                        "activity_manager/max_phantom_processes", "2147483647")) {
+                    LOGGER.i("phantom killer: process limit unavailable (readback mismatch)");
+                    return;
+                }
+            } catch (Exception e) {
+                logPhantomProcessFailure("process limit", e);
+                return;
+            }
+            LOGGER.i("phantom killer: process limit raised (CPU monitoring unchanged)");
+
+            // DeviceConfig.setSyncDisabled on 31/32, setSyncDisabledMode on 33+.
+            // Use their provider calls, avoiding the unregistered ContentResolver again.
+            try {
+                Bundle extras = new Bundle();
+                extras.putInt("_disabled_mode", 1); // PERSISTENT = 1; UNTIL_REBOOT = 2.
+                IContentProviderUtils.callCompat(settingsProvider, callingPackage, "settings",
+                        Build.VERSION.SDK_INT >= 33
+                                ? "SET_SYNC_DISABLED_MODE_config" : "SET_SYNC_DISABLED_config",
+                        null, extras);
+                Bundle result = IContentProviderUtils.callCompat(settingsProvider, callingPackage,
+                        "settings", "GET_global", "device_config_sync_disabled", null);
+                if (result != null && "1".equals(result.getString("value"))) {
+                    LOGGER.i("phantom killer: DeviceConfig sync disabled persistently");
+                } else {
+                    LOGGER.i("phantom killer: sync disable unavailable (readback mismatch)");
+                }
+            } catch (Exception e) {
+                logPhantomProcessFailure("sync disable", e);
+            }
+        } catch (Exception e) {
+            logPhantomProcessFailure("settings provider", e);
+        } finally {
             if (settingsProvider != null) {
                 try {
-                    Bundle extras = new Bundle();
-                    extras.putString("value", "false");
-                    IContentProviderUtils.callCompat(
-                            settingsProvider, null, "settings",
-                            "PUT_global", "settings_enable_monitor_phantom_procs", extras);
+                    ActivityManagerApis.removeContentProviderExternal("settings", null);
                 } catch (Exception e) {
-                    LOGGER.w("phantom killer: settings ContentProvider write failed", e);
+                    logPhantomProcessFailure("provider release", e);
                 }
             }
-
-            // 2. Disable device_config sync so phantom-process limit can't be reset by DeviceConfig push.
-            //    Replaces `device_config set_sync_disabled_for_tests persistent`.
-            //    SYNC_DISABLED_MODE_PERSISTENT = 2 in android.provider.DeviceConfig
-            try {
-                if (Build.VERSION.SDK_INT >= 33) {
-                    java.lang.reflect.Method method = android.provider.DeviceConfig.class
-                            .getMethod("setGlobalSyncDisabledForTests", int.class);
-                    int mode = 2; // DeviceConfig.SYNC_DISABLED_MODE_PERSISTENT
-                    try {
-                        mode = android.provider.DeviceConfig.class
-                                .getField("SYNC_DISABLED_MODE_PERSISTENT").getInt(null);
-                    } catch (Exception ignored) {}
-                    method.invoke(null, mode);
-                }
-            } catch (Exception e) {
-                LOGGER.w("phantom killer: DeviceConfig sync disable failed", e);
-            }
-
-            // 3. Raise max_phantom_processes to INT_MAX.
-            //    Replaces `device_config put activity_manager max_phantom_processes 2147483647`.
-            //    Uses reflection (no direct class reference) so ART on API < 29 does not throw
-            //    NoClassDefFoundError during class verification (#527).
-            try {
-                Class<?> dc = Class.forName("android.provider.DeviceConfig");
-                java.lang.reflect.Method setProperty = dc.getMethod("setProperty",
-                        String.class, String.class, String.class, boolean.class);
-                setProperty.invoke(null, "activity_manager", "max_phantom_processes",
-                        "2147483647", false);
-            } catch (Exception e) {
-                LOGGER.w("phantom killer: DeviceConfig setProperty failed", e);
-            }
-
-            LOGGER.i("Phantom Process Killer mitigation applied");
-        } catch (Exception e) {
-            LOGGER.w("Failed to mitigate Phantom Process Killer", e);
         }
+    }
+
+    private boolean putPhantomProcessSetting(IContentProvider provider, String callingPackage,
+                                            String table, String key, String value)
+            throws RemoteException {
+        Bundle extras = new Bundle();
+        extras.putInt("_user", 0);
+        extras.putString("value", value);
+        IContentProviderUtils.callCompat(provider, callingPackage, "settings",
+                "PUT_" + table, key, extras);
+        Bundle result = IContentProviderUtils.callCompat(provider, callingPackage, "settings",
+                "GET_" + table, key, extras);
+        // PUT returns null even on success; read back rather than claiming it was applied.
+        return result != null && value.equals(result.getString("value"));
+    }
+
+    private void logPhantomProcessFailure(String mechanism, Exception error) {
+        String reason = error instanceof SecurityException ? "permission denied"
+                : error instanceof RemoteException ? "provider IPC failed"
+                : error.getClass().getSimpleName();
+        LOGGER.i("phantom killer: %s unavailable (%s)", mechanism, reason);
     }
 
     public ShizukuService() {
