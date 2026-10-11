@@ -103,6 +103,15 @@ class SingleInstanceGuardTest {
     }
 
     @Test
+    fun `the lock file is used only when it is a regular file with one link owned by root or shell`() {
+        assertTrue(SingleInstanceGuard.isPlainFile(true, 1, 0))
+        assertTrue(SingleInstanceGuard.isPlainFile(true, 1, 2000))
+        kotlin.test.assertFalse(SingleInstanceGuard.isPlainFile(false, 1, 0), "a symbolic link, directory or other node")
+        kotlin.test.assertFalse(SingleInstanceGuard.isPlainFile(true, 2, 0), "a second link to the file")
+        kotlin.test.assertFalse(SingleInstanceGuard.isPlainFile(true, 1, 10_123), "owned by an app")
+    }
+
+    @Test
     fun `a lock that fails for another reason is not retried as contention`() {
         val broken =
             object : SingleInstanceGuard.Lock {

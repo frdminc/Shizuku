@@ -4,6 +4,7 @@ import android.os.SystemClock;
 import android.system.ErrnoException;
 import android.system.Os;
 import android.system.OsConstants;
+import android.system.StructStat;
 
 import androidx.annotation.Nullable;
 import androidx.annotation.VisibleForTesting;
@@ -44,7 +45,9 @@ public final class SingleInstanceGuard {
      * running, and nothing restarts it. A server that is really still running keeps the lock for
      * good, and the one waiting has touched nothing, so waiting longer costs only an idle
      * process. 30 s leaves a server that gets the lock late the rest of the manager's 90 s
-     * start-up timeout (ShizukuStateMachine.STARTING_TIMEOUT_MS) to come up.
+     * start-up timeout (ShizukuStateMachine.STARTING_TIMEOUT_MS) to come up. The start screen
+     * (Starter.waitForBinder) gives up after 20 s and shows its error, so a server that waited
+     * longer than that comes up after the screen has reported a failure.
      */
     static final long WAIT_MS = 30_000;
     static final long RETRY_MS = 100;
@@ -141,45 +144,111 @@ public final class SingleInstanceGuard {
      * root; a shell server started later must still open it, or it would run unguarded. Same bits
      * as the config file: owner and group shell read and write (set again because the umask can
      * clear the group bits at creation).
+     *
+     * <p>The mode and group are set only on a plain file: a regular file with one link, owned by
+     * root or shell, opened without following a symbolic link. Anything else at the path is
+     * removed and the file created afresh; if that fails too, nothing is changed and the lock
+     * attempt runs unguarded (see {@link #FILE_LOCK}).
      */
     private static void createShared(String path) {
-        FileDescriptor fd;
-        try {
-            fd = Os.open(path, OsConstants.O_RDWR | OsConstants.O_CREAT | OsConstants.O_CLOEXEC, 0660);
-        } catch (ErrnoException | RuntimeException e) {
-            // The lock attempt reports it.
-            return;
-        }
-        try {
-            Os.fchmod(fd, 0660);
-            Os.fchown(fd, -1, android.os.Process.SHELL_UID);
-        } catch (ErrnoException | RuntimeException ignored) {
-            // Not the owner (a shell server opening root's file): the bits are already set.
-        } finally {
+        for (int attempt = 0; attempt < 2; attempt++) {
+            FileDescriptor fd;
             try {
-                Os.close(fd);
-            } catch (ErrnoException | RuntimeException ignored) {
+                fd = Os.open(path, OsConstants.O_RDWR | OsConstants.O_CREAT | OsConstants.O_NOFOLLOW
+                        | OsConstants.O_CLOEXEC, 0660);
+            } catch (ErrnoException | RuntimeException e) {
+                // A symbolic link (ELOOP), a directory, or no access: remove what is there once.
+                if (attempt == 0 && removeNonFile(path)) {
+                    continue;
+                }
+                return;
+            }
+            try {
+                StructStat st = Os.fstat(fd);
+                if (!isPlainFile(OsConstants.S_ISREG(st.st_mode), st.st_nlink, st.st_uid)) {
+                    if (attempt == 0 && removeNonFile(path)) {
+                        continue;
+                    }
+                    return;
+                }
+                try {
+                    Os.fchmod(fd, 0660);
+                    Os.fchown(fd, -1, android.os.Process.SHELL_UID);
+                } catch (ErrnoException | RuntimeException ignored) {
+                    // Not the owner (a shell server opening root's file): the bits are already set.
+                }
+                return;
+            } catch (ErrnoException | RuntimeException e) {
+                return;
+            } finally {
+                try {
+                    Os.close(fd);
+                } catch (ErrnoException | RuntimeException ignored) {
+                }
             }
         }
     }
 
+    /** Removes the name at {@code path}, never what a symbolic link there points to. */
+    private static boolean removeNonFile(String path) {
+        try {
+            Os.remove(path);
+            return true;
+        } catch (ErrnoException | RuntimeException e) {
+            LOGGER.w(e, "cannot remove %s", path);
+            return false;
+        }
+    }
+
+    /** The lock file is a regular file with one link, owned by root or shell. */
+    @VisibleForTesting
+    static boolean isPlainFile(boolean regular, long links, int uid) {
+        return regular && links == 1 && (uid == 0 || uid == android.os.Process.SHELL_UID);
+    }
+
+    /**
+     * Opens the file at {@code path} and takes the lock. The file must be the plain file
+     * {@link #createShared} left: checked by lstat before the open (so a symbolic link is never
+     * followed) and by fstat after it (the same file). Otherwise the attempt fails and the server
+     * runs unguarded.
+     */
     private static final Lock FILE_LOCK = path -> {
+        StructStat before;
+        try {
+            before = Os.lstat(path);
+        } catch (ErrnoException e) {
+            throw new IOException(e);
+        }
+        if (!isPlainFile(OsConstants.S_ISREG(before.st_mode), before.st_nlink, before.st_uid)) {
+            throw new IOException(path + " is not a plain file");
+        }
         RandomAccessFile file = new RandomAccessFile(path, "rw");
         try {
+            StructStat opened = Os.fstat(file.getFD());
+            if (opened.st_dev != before.st_dev || opened.st_ino != before.st_ino) {
+                throw new IOException(path + " changed while it was opened");
+            }
             FileLock lock = file.getChannel().tryLock();
             if (lock == null) {
                 file.close();
                 return null;
             }
             return file::close;
+        } catch (ErrnoException e) {
+            closeQuietly(file);
+            throw new IOException(e);
         } catch (IOException | RuntimeException e) {
-            try {
-                file.close();
-            } catch (IOException ignored) {
-            }
+            closeQuietly(file);
             throw e;
         }
     };
+
+    private static void closeQuietly(RandomAccessFile file) {
+        try {
+            file.close();
+        } catch (IOException ignored) {
+        }
+    }
 
     private static final Clock SYSTEM_CLOCK = new Clock() {
         @Override
