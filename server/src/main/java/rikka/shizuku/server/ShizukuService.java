@@ -643,7 +643,8 @@ public class ShizukuService extends Service<ShizukuUserServiceManager, ShizukuCl
      * write runs on a thread of its own and the exit waits for it for at most
      * {@link #exitFlushTimeoutMillis()}: it can wait on the worker's write in progress and on the
      * config manager's lock, and an exit, the crash path's above all, must not hang on either. A
-     * write that fails or does not finish in time is logged and the exit goes ahead.
+     * change the write did not save (it failed, or a change came after it) and a write that does
+     * not finish in time are each logged here, and the exit goes ahead.
      */
     private void saveConfigAndExit(int status) {
         ShizukuConfigManager config = configManager;
@@ -657,9 +658,11 @@ public class ShizukuService extends Service<ShizukuUserServiceManager, ShizukuCl
     private static void flushBeforeExit(ShizukuConfigManager config, long timeoutMs) {
         Thread flush = new Thread(() -> {
             try {
-                config.flushPendingWrite();
+                if (!config.flushPendingWrite()) {
+                    LOGGER.e("the config could not be saved before exiting; changes since the last save are lost");
+                }
             } catch (Throwable t) {
-                LOGGER.w(t, "cannot write the config before exiting");
+                LOGGER.e(t, "cannot write the config before exiting; changes since the last save are lost");
             }
         }, "config-flush");
         flush.setDaemon(true);

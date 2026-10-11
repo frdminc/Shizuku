@@ -60,6 +60,9 @@ public class ShizukuConfigManager extends ConfigManager {
      */
     private static final long RETRY_FIRST_DELAY = 1000;
 
+    /** How many failed writes in a row between the lines that say the config is still not saved. */
+    private static final int FAILURE_LOG_EVERY = 60;
+
     /** No write is waiting. */
     private static final int WRITE_NONE = 0;
     /** A write is posted to run after {@link #WRITE_DELAY}. */
@@ -125,9 +128,15 @@ public class ShizukuConfigManager extends ConfigManager {
     /**
      * Writes a change still waiting for the worker now, on the calling thread; nothing when none
      * is. For an exit, which would otherwise lose it.
+     *
+     * @return false when a change is still waiting afterwards: the write failed, or a change was
+     * made after it
      */
-    void flushPendingWrite() {
+    boolean flushPendingWrite() {
         writePending();
+        synchronized (this) {
+            return pendingWrite == WRITE_NONE;
+        }
     }
 
     /**
@@ -179,10 +188,15 @@ public class ShizukuConfigManager extends ConfigManager {
      * After a write that failed: the change waits again, and a retry is posted after
      * {@link #retryDelay(int)}. A prompt write posted meanwhile (a change made during the write)
      * is left to run as posted, and a delayed one is brought forward to the retry. The failure is
-     * logged once per run of failures, and the write that ends the run says so.
+     * logged with its cause at the start of a run of failures, again in one line every
+     * {@link #FAILURE_LOG_EVERY} failures while the run lasts, and the write that ends the run
+     * says so.
      */
     private void writeFailedLocked(Throwable failure) {
         writeFailures++;
+        if (writeFailures % FAILURE_LOG_EVERY == 0) {
+            LOGGER.w("%s still not saved after %d failed attempts: %s", CONFIG_FILE.getPath(), writeFailures, failure);
+        }
         if (pendingWrite == WRITE_PROMPT) {
             if (writeFailures == 1) {
                 LOGGER.e(failure, "can't save %s; the previous config is kept, trying again now",

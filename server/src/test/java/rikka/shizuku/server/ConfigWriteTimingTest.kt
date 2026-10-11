@@ -296,9 +296,10 @@ class ConfigWriteTimingTest {
 
     @Test
     fun `a write that fails is tried again and the change reaches the disk`() {
-        // The real config file logic over a real directory, with the temp file failing to be
-        // created on the first attempt, as a full disk fails it.
-        val ops = SafeConfigFileTest.FaultyOps(SafeConfigFileTest.NioOps()).apply { failCreate = true }
+        // The real config file logic over a real directory. On the first attempt the temp file
+        // is written in full and then cannot be renamed to either of the config's names.
+        val temp = dir.resolve("shizuku.json.tmp.4242").toString()
+        val ops = SafeConfigFileTest.FaultyOps(SafeConfigFileTest.NioOps()).apply { failRenameFrom = temp }
         val file = SafeConfigFile(dir.resolve("shizuku.json").toFile(), ops, 4242)
         every { ShizukuConfigManager.writeJson(any()) } answers {
             attempts.add(now)
@@ -308,8 +309,10 @@ class ConfigWriteTimingTest {
 
         manager.update(APP_UID, listOf(packageOf(APP_UID)), ConfigManager.MASK_PERMISSION, ConfigManager.FLAG_DENIED)
         advance(0)
+        assertTrue("create $temp" in ops.log, "the failed attempt did not get as far as the temp file")
         assertEquals(null, file.read(), "the failed write left something at the config's name")
-        ops.failCreate = false
+        assertEquals(emptyList(), dir.toFile().list()!!.toList(), "the failed write left its temp file")
+        ops.failRenameFrom = null
         advance(BATCH_DELAY)
 
         assertEquals(2, attempts.size, "the failed write was not tried again, or was tried more than once")
@@ -352,6 +355,43 @@ class ConfigWriteTimingTest {
         assertEquals(ConfigManager.FLAG_DENIED, flagsOf(writes.single(), OTHER_UID))
         advance(BATCH_DELAY)
         assertEquals(1, writes.size, "a write ran again with nothing new")
+    }
+
+    @Test
+    fun `a delayed write asked for while a write fails is brought forward to the retry`() {
+        // A grant start-up could not check, with no signers recorded: the check in find() fills
+        // them in, which asks for a delayed write.
+        stored.packages.add(
+            ShizukuConfig.PackageEntry(APP_UID, ConfigManager.FLAG_ALLOWED).apply { packages.add(packageOf(APP_UID)) }
+        )
+        val manager = start()
+        assertTrue(queue.isEmpty())
+        failWrites = 1
+        duringWrite = { manager.find(APP_UID) }
+
+        manager.update(OTHER_UID, listOf(packageOf(OTHER_UID)), ConfigManager.MASK_PERMISSION, ConfigManager.FLAG_DENIED)
+        advance(BATCH_DELAY * 2)
+
+        assertEquals(listOf(0L, FIRST_RETRY), attempts, "the fill-in kept the batch delay after the failed write")
+        assertEquals(1, writes.size)
+        assertEquals(listOf(OURS), writes.single().packages.first { it.uid == APP_UID }.signers)
+        assertEquals(ConfigManager.FLAG_DENIED, flagsOf(writes.single(), OTHER_UID))
+    }
+
+    @Test
+    fun `an exit flush that fails says the change is not saved and leaves one retry waiting`() {
+        val manager = start()
+        failWrites = 2
+
+        manager.update(APP_UID, listOf(packageOf(APP_UID)), ConfigManager.MASK_PERMISSION, ConfigManager.FLAG_DENIED)
+        advance(0)
+
+        assertFalse(manager.flushPendingWrite(), "a failed flush reported the change as saved")
+        assertEquals(2, attempts.size)
+        assertEquals(1, queue.size, "not exactly one retry waiting after the failed flush")
+        assertTrue(manager.flushPendingWrite(), "a flush that wrote the change reported it as not saved")
+        assertEquals(ConfigManager.FLAG_DENIED, flagsOf(writes.single(), APP_UID))
+        assertTrue(manager.flushPendingWrite(), "a flush with nothing waiting reported a change not saved")
     }
 
     @Test
@@ -419,7 +459,7 @@ class ConfigWriteTimingTest {
         val manager = mockk<ShizukuConfigManager>()
         every { manager.flushPendingWrite() } answers {
             order.add("flush")
-            Unit
+            true
         }
         val service = serviceExitingInto(order)
         setField(ShizukuService::class.java, service, "configManager", manager)
@@ -440,6 +480,22 @@ class ConfigWriteTimingTest {
         service.exit()
 
         assertEquals(listOf("exit 0"), order)
+    }
+
+    @Test
+    fun `an exit still ends the server when the flush reports the change not saved`() {
+        val order = mutableListOf<String>()
+        val manager = mockk<ShizukuConfigManager>()
+        every { manager.flushPendingWrite() } answers {
+            order.add("flush")
+            false
+        }
+        val service = serviceExitingInto(order)
+        setField(ShizukuService::class.java, service, "configManager", manager)
+
+        service.exit()
+
+        assertEquals(listOf("flush", "exit 0"), order)
     }
 
     @Test
@@ -488,7 +544,7 @@ class ConfigWriteTimingTest {
         val manager = mockk<ShizukuConfigManager>()
         every { manager.flushPendingWrite() } answers {
             order.add("flush")
-            Unit
+            true
         }
         val service = serviceExitingInto(order)
         setField(ShizukuService::class.java, service, "configManager", manager)
@@ -505,7 +561,7 @@ class ConfigWriteTimingTest {
         val manager = mockk<ShizukuConfigManager>()
         every { manager.flushPendingWrite() } answers {
             stuck.await(10, TimeUnit.SECONDS)
-            Unit
+            true
         }
         val service = serviceExitingInto(order)
         every { ShizukuService.exitFlushTimeoutMillis() } returns EXIT_BOUND

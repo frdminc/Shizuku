@@ -94,6 +94,9 @@ final class SafeConfigFile {
     private final String newName;
     private final Ops ops;
 
+    /** The last write could not rename its temp file to the backup's name. Guarded by this. */
+    private boolean backupRenameFailing;
+
     SafeConfigFile(File base) {
         this(base, OS_OPS, Os.getpid());
     }
@@ -159,7 +162,14 @@ final class SafeConfigFile {
         } catch (IOException | RuntimeException e) {
             // Nothing can be renamed to the backup's name (a directory there, say): straight to
             // the config's name, then the backup goes, or it would be read in place of this write.
-            LOGGER.w(e, "cannot rename %s to %s; renaming it to %s", temp, backup, base);
+            // Logged with its cause the first time in a row; a failure that persists would
+            // otherwise log a stack on every retry.
+            if (backupRenameFailing) {
+                LOGGER.d("cannot rename %s to %s (%s); renaming it to %s", temp, backup, e, base);
+            } else {
+                LOGGER.w(e, "cannot rename %s to %s; renaming it to %s", temp, backup, base);
+                backupRenameFailing = true;
+            }
             try {
                 ops.rename(temp, base);
             } catch (IOException | RuntimeException e2) {
@@ -171,6 +181,7 @@ final class SafeConfigFile {
             syncDirQuietly();
             return;
         }
+        backupRenameFailing = false;
         try {
             ops.rename(backup, base);
         } catch (IOException | RuntimeException e) {
