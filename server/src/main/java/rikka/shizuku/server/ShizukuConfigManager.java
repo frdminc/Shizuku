@@ -133,10 +133,11 @@ public class ShizukuConfigManager extends ConfigManager {
         synchronized (CONFIG_FILE) {
             String json;
             synchronized (this) {
-                HandlerKt.getWorkerHandler().removeCallbacks(mWriteRunner);
+                // Checked first: a flush with nothing waiting does not start the worker thread.
                 if (pendingWrite == WRITE_NONE) {
                     return;
                 }
+                HandlerKt.getWorkerHandler().removeCallbacks(mWriteRunner);
                 // Cleared before the copy: a change after it posts a write of its own.
                 pendingWrite = WRITE_NONE;
                 try {
@@ -287,8 +288,11 @@ public class ShizukuConfigManager extends ConfigManager {
         }
 
         if (changed) {
-            // Start-up: one write for the whole reconcile and import.
-            scheduleWriteLocked(false);
+            // Start-up: one write for the whole reconcile and import. Under the lock, as the
+            // worker reads pendingWrite under it.
+            synchronized (this) {
+                scheduleWriteLocked(false);
+            }
         }
     }
 

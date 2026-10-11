@@ -507,7 +507,7 @@ class SafeConfigFileTest {
      * The file operations over java.nio, each without following a symbolic link at the name it is
      * given, as the device operations over android.system.Os do.
      */
-    private class NioOps : SafeConfigFile.Ops {
+    internal class NioOps : SafeConfigFile.Ops {
         private fun attrs(path: String): BasicFileAttributes? =
             try {
                 Files.readAttributes(Path.of(path), BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS)

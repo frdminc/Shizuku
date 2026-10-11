@@ -14,13 +14,22 @@ import io.mockk.every
 import io.mockk.mockk
 import io.mockk.mockkStatic
 import io.mockk.unmockkAll
+import io.mockk.verify
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.io.TempDir
 import rikka.hidden.compat.PackageManagerApis
 import rikka.hidden.compat.UserManagerApis
 import rikka.shizuku.server.ktx.workerHandler
+import java.nio.file.Path
+import java.util.Collections
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.concurrent.thread
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 /**
@@ -32,6 +41,9 @@ import kotlin.test.assertTrue
  * is due, and every config write is recorded instead of reaching the disk.
  */
 class ConfigWriteTimingTest {
+
+    @TempDir
+    lateinit var dir: Path
 
     private val stored = ShizukuConfig()
     private var installed: List<PackageInfo> = emptyList()
@@ -58,10 +70,6 @@ class ConfigWriteTimingTest {
             val runnable = firstArg<Runnable>()
             queue.removeAll { it.runnable === runnable }
             Unit
-        }
-        every { handler.hasCallbacks(any()) } answers {
-            val runnable = firstArg<Runnable>()
-            queue.any { it.runnable === runnable }
         }
         mockkStatic("rikka.shizuku.server.ktx.HandlerKt")
         every { workerHandler } returns handler
@@ -213,13 +221,61 @@ class ConfigWriteTimingTest {
     }
 
     @Test
-    fun `a flush with nothing waiting writes nothing`() {
+    fun `a flush with nothing waiting writes nothing and does not start the worker`() {
         val manager = start()
 
         manager.flushPendingWrite()
         advance(BATCH_DELAY)
 
         assertTrue(writes.isEmpty())
+        verify(exactly = 0) { workerHandler }
+    }
+
+    @Test
+    fun `the worker's write and an exit flush on another thread reach the disk in order`() {
+        // The real config file logic over a real directory; the worker's write of change A is
+        // held after the manager copied the config and before the file is written, which is
+        // where a flush that did not wait for it would overtake it with a newer copy.
+        val file = SafeConfigFile(dir.resolve("shizuku.json").toFile(), SafeConfigFileTest.NioOps(), 4242)
+        val onDisk = Collections.synchronizedList(mutableListOf<ShizukuConfig>())
+        val workerWriting = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val first = AtomicBoolean(true)
+        every { ShizukuConfigManager.writeJson(any()) } answers {
+            if (first.getAndSet(false)) {
+                workerWriting.countDown()
+                release.await(5, TimeUnit.SECONDS)
+            }
+            file.write(firstArg<String>().toByteArray())
+            onDisk.add(Gson().fromJson(String(file.read()!!), ShizukuConfig::class.java))
+        }
+        val manager = start()
+
+        manager.update(APP_UID, listOf(packageOf(APP_UID)), ConfigManager.MASK_PERMISSION, ConfigManager.FLAG_ALLOWED)
+        val write = queue.single().runnable
+        queue.clear()
+        val worker = thread(name = "Worker") { write.run() }
+        assertTrue(workerWriting.await(5, TimeUnit.SECONDS), "the worker did not start writing")
+
+        manager.update(OTHER_UID, listOf(packageOf(OTHER_UID)), ConfigManager.MASK_PERMISSION, ConfigManager.FLAG_DENIED)
+        val flushed = CountDownLatch(1)
+        val exiting = thread(name = "exit") {
+            manager.flushPendingWrite()
+            flushed.countDown()
+        }
+        assertFalse(flushed.await(200, TimeUnit.MILLISECONDS), "the flush did not wait for the write in progress")
+        release.countDown()
+        worker.join(5_000)
+        exiting.join(5_000)
+
+        assertEquals(2, onDisk.size, "a write was lost or written twice")
+        assertEquals(ConfigManager.FLAG_ALLOWED, flagsOf(onDisk[0], APP_UID))
+        assertEquals(null, flagsOf(onDisk[0], OTHER_UID), "the worker's write held a change made after its copy")
+        assertEquals(ConfigManager.FLAG_ALLOWED, flagsOf(onDisk[1], APP_UID))
+        assertEquals(ConfigManager.FLAG_DENIED, flagsOf(onDisk[1], OTHER_UID), "the flush lost the change made during the write")
+        val last = Gson().fromJson(String(file.read()!!), ShizukuConfig::class.java)
+        assertEquals(ConfigManager.FLAG_DENIED, flagsOf(last, OTHER_UID), "an older copy reached the disk last")
+        assertTrue(queue.isEmpty(), "the worker still has a write waiting after the flush")
     }
 
     // --- exit ----------------------------------------------------------------------------------
@@ -251,6 +307,93 @@ class ConfigWriteTimingTest {
         service.exit()
 
         assertEquals(listOf("exit 0"), order)
+    }
+
+    @Test
+    fun `an exit does not wait longer than its bound for a config write that does not finish`() {
+        // The worker's write hangs while it holds the config file, as a stalled sync would.
+        val stuck = CountDownLatch(1)
+        val hung = CountDownLatch(1)
+        val written = CountDownLatch(2)
+        every { ShizukuConfigManager.writeJson(any()) } answers {
+            hung.countDown()
+            stuck.await(10, TimeUnit.SECONDS)
+            written.countDown()
+            Unit
+        }
+        val manager = start()
+        manager.update(APP_UID, listOf(packageOf(APP_UID)), ConfigManager.MASK_PERMISSION, ConfigManager.FLAG_ALLOWED)
+        val write = queue.single().runnable
+        queue.clear()
+        val worker = thread(name = "Worker") { write.run() }
+        try {
+            assertTrue(hung.await(5, TimeUnit.SECONDS))
+            manager.update(OTHER_UID, listOf(packageOf(OTHER_UID)), ConfigManager.MASK_PERMISSION, ConfigManager.FLAG_DENIED)
+            val order = Collections.synchronizedList(mutableListOf<String>())
+            val service = serviceExitingInto(order)
+            every { ShizukuService.exitFlushTimeoutMillis() } returns EXIT_BOUND
+            setField(ShizukuService::class.java, service, "configManager", manager)
+
+            val started = System.nanoTime()
+            service.exit()
+            val waited = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started)
+
+            assertEquals(listOf("exit 0"), order)
+            assertTrue(waited >= EXIT_BOUND, "the exit did not wait for the write at all ($waited ms)")
+            assertTrue(waited < 5_000, "the exit waited $waited ms for a write that does not finish")
+        } finally {
+            // The flush left behind writes once the worker's write ends; let it, before teardown.
+            stuck.countDown()
+            worker.join(5_000)
+            written.await(5, TimeUnit.SECONDS)
+        }
+    }
+
+    @Test
+    fun `the uncaught-exception handler writes a waiting change and exits with status 1`() {
+        val order = Collections.synchronizedList(mutableListOf<String>())
+        val manager = mockk<ShizukuConfigManager>()
+        every { manager.flushPendingWrite() } answers {
+            order.add("flush")
+            Unit
+        }
+        val service = serviceExitingInto(order)
+        setField(ShizukuService::class.java, service, "configManager", manager)
+
+        service.onUncaughtException(Thread.currentThread(), IllegalStateException("crash"))
+
+        assertEquals(listOf("flush", "exit 1"), order)
+    }
+
+    @Test
+    fun `the uncaught-exception handler exits within its bound when the config write hangs`() {
+        val order = Collections.synchronizedList(mutableListOf<String>())
+        val stuck = CountDownLatch(1)
+        val manager = mockk<ShizukuConfigManager>()
+        every { manager.flushPendingWrite() } answers {
+            stuck.await(10, TimeUnit.SECONDS)
+            Unit
+        }
+        val service = serviceExitingInto(order)
+        every { ShizukuService.exitFlushTimeoutMillis() } returns EXIT_BOUND
+        setField(ShizukuService::class.java, service, "configManager", manager)
+
+        try {
+            service.onUncaughtException(Thread.currentThread(), IllegalStateException("crash"))
+            assertEquals(listOf("exit 1"), order)
+        } finally {
+            stuck.countDown()
+        }
+    }
+
+    @Test
+    fun `an exit before the config manager is stored does not write`() {
+        val order = Collections.synchronizedList(mutableListOf<String>())
+        val service = serviceExitingInto(order)
+
+        service.onUncaughtException(Thread.currentThread(), IllegalStateException("crash"))
+
+        assertEquals(listOf("exit 1"), order)
     }
 
     /** A ShizukuService whose exits are recorded in [order] instead of ending the JVM. */
@@ -332,5 +475,6 @@ class ConfigWriteTimingTest {
         const val OTHER_UID = 10_124
         const val BATCH_DELAY = 10_000L
         const val SERVER_PID = 4242
+        const val EXIT_BOUND = 150L
     }
 }

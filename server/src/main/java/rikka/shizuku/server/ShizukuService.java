@@ -304,16 +304,7 @@ public class ShizukuService extends Service<ShizukuUserServiceManager, ShizukuCl
     public ShizukuService() {
         super();
 
-        Thread.setDefaultUncaughtExceptionHandler((thread, throwable) -> {
-            LOGGER.e(throwable, "Uncaught exception in server thread " + thread.getName());
-            try {
-                // Give some time for the event to be dispatched before the process dies
-                Thread.sleep(500);
-            } catch (Throwable ignored) {
-            }
-            // Null until the config manager is created, and then nothing can be waiting.
-            saveConfigAndExit(1);
-        });
+        Thread.setDefaultUncaughtExceptionHandler(this::onUncaughtException);
 
         HandlerUtil.setMainHandler(mainHandler);
 
@@ -629,21 +620,68 @@ public class ShizukuService extends Service<ShizukuUserServiceManager, ShizukuCl
         saveConfigAndExit(0);
     }
 
+    /** The default uncaught-exception handler, installed first thing in the constructor. */
+    void onUncaughtException(Thread thread, Throwable throwable) {
+        LOGGER.e(throwable, "Uncaught exception in server thread " + thread.getName());
+        try {
+            // Give some time for the event to be dispatched before the process dies
+            Thread.sleep(500);
+        } catch (Throwable ignored) {
+        }
+        // The config manager is created in super(), before this handler is installed, but the
+        // field is assigned only further down the constructor. Until then the only write that can
+        // be waiting is the start-up batch, which the next start works out again.
+        saveConfigAndExit(1);
+    }
+
+    /** How long an exit waits for the config write before it goes ahead without it. */
+    private static final long EXIT_FLUSH_TIMEOUT_MS = 2000;
+
     /**
      * Writes a config change still waiting for the worker, then exits. The worker writes a change
-     * the operator made at once, but one made just before an exit can still be in its queue. A
-     * failed write is logged and the exit goes ahead.
+     * the operator made at once, but one made just before an exit can still be in its queue. The
+     * write runs on a thread of its own and the exit waits for it for at most
+     * {@link #exitFlushTimeoutMillis()}: it can wait on the worker's write in progress and on the
+     * config manager's lock, and an exit, the crash path's above all, must not hang on either. A
+     * write that fails or does not finish in time is logged and the exit goes ahead.
      */
     private void saveConfigAndExit(int status) {
         ShizukuConfigManager config = configManager;
         if (config != null) {
+            flushBeforeExit(config, exitFlushTimeoutMillis());
+        }
+        exitProcess(status);
+    }
+
+    /** Runs {@code config}'s flush on a thread of its own and waits for it for at most {@code timeoutMs}. */
+    private static void flushBeforeExit(ShizukuConfigManager config, long timeoutMs) {
+        Thread flush = new Thread(() -> {
             try {
                 config.flushPendingWrite();
             } catch (Throwable t) {
                 LOGGER.w(t, "cannot write the config before exiting");
             }
+        }, "config-flush");
+        flush.setDaemon(true);
+        try {
+            flush.start();
+        } catch (Throwable t) {
+            LOGGER.w(t, "cannot start the config write before exiting");
+            return;
         }
-        exitProcess(status);
+        try {
+            flush.join(timeoutMs);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+        if (flush.isAlive()) {
+            LOGGER.w("the config write did not finish within %d ms; exiting without waiting for it", timeoutMs);
+        }
+    }
+
+    /** {@link #EXIT_FLUSH_TIMEOUT_MS}; a seam, so tests need not wait for it. */
+    static long exitFlushTimeoutMillis() {
+        return EXIT_FLUSH_TIMEOUT_MS;
     }
 
     /** System.exit; a seam, so tests can follow an exit path without ending the test JVM. */
