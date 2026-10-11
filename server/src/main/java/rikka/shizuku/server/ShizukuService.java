@@ -311,13 +311,14 @@ public class ShizukuService extends Service<ShizukuUserServiceManager, ShizukuCl
             } catch (Exception e) {
                 logPhantomProcessFailure("sync disable", e);
             }
-        } catch (Exception e) {
+        } catch (Throwable e) {
+            // Throwable: a LinkageError on an unusual framework must not stop the server starting.
             logPhantomProcessFailure("settings provider", e);
         } finally {
             if (settingsProvider != null) {
                 try {
                     ActivityManagerApis.removeContentProviderExternal("settings", null);
-                } catch (Exception e) {
+                } catch (Throwable e) {
                     logPhantomProcessFailure("provider release", e);
                 }
             }
@@ -332,13 +333,15 @@ public class ShizukuService extends Service<ShizukuUserServiceManager, ShizukuCl
         extras.putString("value", value);
         IContentProviderUtils.callCompat(provider, callingPackage, "settings",
                 "PUT_" + table, key, extras);
+        Bundle getExtras = new Bundle();
+        getExtras.putInt("_user", 0);
         Bundle result = IContentProviderUtils.callCompat(provider, callingPackage, "settings",
-                "GET_" + table, key, extras);
+                "GET_" + table, key, getExtras);
         // PUT returns null even on success; read back rather than claiming it was applied.
         return result != null && value.equals(result.getString("value"));
     }
 
-    private void logPhantomProcessFailure(String mechanism, Exception error) {
+    private void logPhantomProcessFailure(String mechanism, Throwable error) {
         String reason = error instanceof SecurityException ? "permission denied"
                 : error instanceof RemoteException ? "provider IPC failed"
                 : error.getClass().getSimpleName();
