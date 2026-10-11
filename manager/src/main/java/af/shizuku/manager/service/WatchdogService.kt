@@ -4,6 +4,7 @@ import af.shizuku.manager.MainActivity
 import af.shizuku.manager.R
 import af.shizuku.manager.ShizukuSettings
 import af.shizuku.manager.receiver.ShizukuReceiverStarter
+import af.shizuku.manager.utils.LiveActivityNotificationManager
 import af.shizuku.manager.utils.ManagerActivityLog
 import af.shizuku.manager.utils.SettingsPage
 import af.shizuku.manager.utils.ShizukuStateMachine
@@ -18,11 +19,15 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.net.Uri
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import androidx.core.app.NotificationCompat
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.first
 import timber.log.Timber
+import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicBoolean
 
 class WatchdogService : Service() {
@@ -30,6 +35,8 @@ class WatchdogService : Service() {
     private var consecutiveCrashes = 0
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private var job: Job? = null
+    private var pendingRecoveryJob: Job? = null
+    private var stabilityJob: Job? = null
 
     // Only true when the user explicitly taps "Turn off" from the notification — keeps
     // onDestroy() from clearing the watchdog setting when the service self-stops due to a
@@ -41,16 +48,17 @@ class WatchdogService : Service() {
     // restrictions, etc. — same pattern as AutomationService.ensureForeground(), SHIZUKUPLUS-5P).
     private fun startForegroundSafely(): Boolean =
         try {
+            val notif = buildNotification(this, currentLiveStatus)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
                 startForeground(
                     NOTIFICATION_ID_WATCHDOG,
-                    buildNotification(),
+                    notif,
                     ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE,
                 )
             } else {
                 startForeground(
                     NOTIFICATION_ID_WATCHDOG,
-                    buildNotification(),
+                    notif,
                 )
             }
             true
@@ -61,7 +69,15 @@ class WatchdogService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        isRunning.set(true)
+        setRunning(true)
+
+        // Stop legacy ShizukuLiveService and dismiss notification 9999 if active (#33, #34)
+        try {
+            stopService(Intent(this, ShizukuLiveService::class.java))
+            LiveActivityNotificationManager.dismiss(this)
+        } catch (e: Exception) {
+            Timber.tag(TAG).w(e, "Failed to stop legacy live service on watchdog start")
+        }
 
         // Create notification channel before startForeground() to avoid
         // InvalidForegroundServiceTypeException. Wrapped in try-catch so that
@@ -81,7 +97,7 @@ class WatchdogService : Service() {
         // Must be called within 5s of startForegroundService(); do it before any
         // coroutine work so that a heavy initialisation path can never delay it.
         if (!startForegroundSafely()) {
-            isRunning.set(false)
+            setRunning(false)
             stopSelf()
             return
         }
@@ -90,6 +106,16 @@ class WatchdogService : Service() {
             scope.launch {
                 ShizukuStateMachine.asFlow().collectLatest { state ->
                     if (state == ShizukuStateMachine.State.CRASHED) {
+                        // The server is no longer RUNNING, so the stability window ends here:
+                        // left armed, it would fire while the server is dead and reset
+                        // consecutiveCrashes, making the next crash look like a first restart (#35).
+                        stabilityJob?.cancel()
+                        // A recovery job armed by an earlier first restart is stale too: the
+                        // server just died again, so what that job waits for is a later
+                        // restart's business now. Left armed, its timeout would post a
+                        // duplicate heads-up for this same outage, or a later restart's
+                        // server would be logged as "came back after restart #1" (#35).
+                        pendingRecoveryJob?.cancel()
                         // A restart run from outside the app (a shell, ops tooling) kills the
                         // server and starts a new one, and its binder dies here like a crash's.
                         // Restarting at once started a second starter alongside that one, and the
@@ -105,6 +131,7 @@ class WatchdogService : Service() {
                         val now = System.currentTimeMillis()
                         val cooldown = backoffMs(consecutiveCrashes)
                         if (now - lastRestartMs > cooldown) {
+                            val wasFirstRestart = (consecutiveCrashes == 0)
                             consecutiveCrashes++
                             lastRestartMs = now
                             // An unanswered authorisation dialog stops unattended ADB starts, so
@@ -121,8 +148,30 @@ class WatchdogService : Service() {
                                     "Watchdog: crash #$consecutiveCrashes, restart withheld until an explicit start (authorisation dialog unanswered)",
                                 )
                             } else {
-                                showCrashNotification()
+                                if (!wasFirstRestart) {
+                                    showCrashNotification()
+                                }
                                 ManagerActivityLog.log(applicationContext, "Watchdog: restarting after crash #$consecutiveCrashes")
+                                if (wasFirstRestart) {
+                                    pendingRecoveryJob?.cancel()
+                                    pendingRecoveryJob =
+                                        scope.launch {
+                                            val cameBack =
+                                                withTimeoutOrNull(RECOVERY_WAIT_MS) {
+                                                    if (ShizukuStateMachine.get() == ShizukuStateMachine.State.RUNNING) {
+                                                        true
+                                                    } else {
+                                                        ShizukuStateMachine.asFlow().first { it == ShizukuStateMachine.State.RUNNING }
+                                                        true
+                                                    }
+                                                } ?: false
+                                            if (cameBack) {
+                                                ManagerActivityLog.log(applicationContext, "Watchdog: the server came back after restart #1")
+                                            } else {
+                                                showCrashNotification()
+                                            }
+                                        }
+                                }
                             }
                             ShizukuReceiverStarter.start(applicationContext)
                             Timber.tag(TAG).d("Watchdog: restart #$consecutiveCrashes (cooldown was ${cooldown}ms)")
@@ -130,8 +179,15 @@ class WatchdogService : Service() {
                             Timber.tag(TAG).d("Watchdog: restart suppressed (cooldown active, ${now - lastRestartMs}ms / ${cooldown}ms)")
                         }
                     } else if (state == ShizukuStateMachine.State.RUNNING) {
-                        // Reset backoff counter once service is confirmed stable
-                        consecutiveCrashes = 0
+                        // Not pendingRecoveryJob: RUNNING is exactly what the recovery check
+                        // waits for, and both run on the main dispatcher, so cancelling here
+                        // would kill that check before it logs the recovery (#35).
+                        stabilityJob?.cancel()
+                        stabilityJob =
+                            scope.launch {
+                                delay(STABILITY_WINDOW_MS)
+                                consecutiveCrashes = 0
+                            }
                     }
                 }
             }
@@ -143,7 +199,7 @@ class WatchdogService : Service() {
         startId: Int,
     ): Int {
         if (!startForegroundSafely()) {
-            isRunning.set(false)
+            setRunning(false)
             stopSelf()
             return START_NOT_STICKY
         }
@@ -156,9 +212,20 @@ class WatchdogService : Service() {
     }
 
     override fun onDestroy() {
+        stabilityJob?.cancel()
+        pendingRecoveryJob?.cancel()
         job?.cancel()
         scope.cancel()
-        isRunning.set(false)
+        setRunning(false)
+        currentLiveStatus = null
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+        } else {
+            @Suppress("DEPRECATION")
+            stopForeground(true)
+        }
+        val nm = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+        nm?.cancel(NOTIFICATION_ID_WATCHDOG)
         // Only clear the user's preference when the service was deliberately stopped via the
         // notification action. Transient stops (failed foreground-start, background-start
         // restrictions) must not wipe the setting — the watchdog should re-arm on next boot.
@@ -170,48 +237,7 @@ class WatchdogService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
-    private fun buildNotification(): Notification {
-        // Channel created in onCreate(); reference it by constant here
-        val launchIntent =
-            Intent(this, MainActivity::class.java).apply {
-                addFlags(
-                    Intent.FLAG_ACTIVITY_NEW_TASK or
-                        Intent.FLAG_ACTIVITY_CLEAR_TOP or
-                        Intent.FLAG_ACTIVITY_SINGLE_TOP,
-                )
-            }
-        val launchPendingIntent =
-            PendingIntent.getActivity(
-                this,
-                0,
-                launchIntent,
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-            )
-
-        val stopIntent =
-            Intent(this, WatchdogService::class.java).apply {
-                action = ACTION_STOP_SERVICE
-            }
-        val stopPendingIntent =
-            PendingIntent.getService(
-                this,
-                1,
-                stopIntent,
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-            )
-
-        return NotificationCompat
-            .Builder(this, WATCHDOG_CHANNEL_ID)
-            .setContentTitle(getString(R.string.watchdog_running))
-            .setSmallIcon(R.drawable.ic_notification_icon)
-            .setContentIntent(launchPendingIntent)
-            .addAction(
-                R.drawable.ic_close_24,
-                getString(R.string.watchdog_turn_off),
-                stopPendingIntent,
-            ).setOngoing(true)
-            .build()
-    }
+    private fun buildNotification(): Notification = buildNotification(this, currentLiveStatus)
 
     private fun showCrashNotification() {
         val channelId = CRASH_CHANNEL_ID
@@ -288,12 +314,103 @@ class WatchdogService : Service() {
         /** How long a crash waits for a server restarted from outside the app to come back. */
         const val RESTART_GRACE_MS = 10_000L
 
+        /** How long a first restart waits for RUNNING before the crash heads-up is posted: a successful restart took ~11 s on an API 34 emulator, a loaded device's first start 32 s. A restart slower than this, or one that raises a fresh authorisation dialog answered later, still gets the heads-up — by design for now. */
+        const val RECOVERY_WAIT_MS = 60_000L
+
+        /** How long the server must remain RUNNING before consecutive crash count resets. */
+        const val STABILITY_WINDOW_MS = 60_000L
+
         private const val BASE_COOLDOWN_MS = 5_000L
         private const val MAX_COOLDOWN_MS = 300_000L // 5 min cap
         private val isRunning = AtomicBoolean(false)
+        private val runningListeners = CopyOnWriteArrayList<(Boolean) -> Unit>()
+        @Volatile private var currentLiveStatus: String? = null
 
         fun backoffMs(crashes: Int): Long =
             minOf(BASE_COOLDOWN_MS * (1L shl crashes.coerceAtMost(10)), MAX_COOLDOWN_MS)
+
+        @JvmStatic
+        fun addRunningListener(listener: (Boolean) -> Unit) {
+            runningListeners.add(listener)
+        }
+
+        @JvmStatic
+        fun removeRunningListener(listener: (Boolean) -> Unit) {
+            runningListeners.remove(listener)
+        }
+
+        private fun setRunning(running: Boolean) {
+            if (isRunning.getAndSet(running) != running) {
+                if (Looper.myLooper() == Looper.getMainLooper()) {
+                    runningListeners.forEach { it(running) }
+                } else {
+                    Handler(Looper.getMainLooper()).post {
+                        runningListeners.forEach { it(running) }
+                    }
+                }
+            }
+        }
+
+        @JvmStatic
+        fun updateLiveStatus(context: Context, status: String?) {
+            currentLiveStatus = status
+            if (isRunning()) {
+                val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+                nm?.notify(NOTIFICATION_ID_WATCHDOG, buildNotification(context, status))
+            }
+        }
+
+        @JvmStatic
+        fun buildNotification(
+            context: Context,
+            status: String? = currentLiveStatus,
+        ): Notification {
+            val launchIntent =
+                Intent(context, MainActivity::class.java).apply {
+                    addFlags(
+                        Intent.FLAG_ACTIVITY_NEW_TASK or
+                            Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                            Intent.FLAG_ACTIVITY_SINGLE_TOP,
+                    )
+                }
+            val launchPendingIntent =
+                PendingIntent.getActivity(
+                    context,
+                    0,
+                    launchIntent,
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+                )
+
+            val stopIntent =
+                Intent(context, WatchdogService::class.java).apply {
+                    action = ACTION_STOP_SERVICE
+                }
+            val stopPendingIntent =
+                PendingIntent.getService(
+                    context,
+                    1,
+                    stopIntent,
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+                )
+
+            val builder =
+                NotificationCompat
+                    .Builder(context, WATCHDOG_CHANNEL_ID)
+                    .setContentTitle(context.getString(R.string.watchdog_running))
+                    .setSmallIcon(R.drawable.ic_notification_icon)
+                    .setContentIntent(launchPendingIntent)
+                    .addAction(
+                        R.drawable.ic_close_24,
+                        context.getString(R.string.watchdog_turn_off),
+                        stopPendingIntent,
+                    ).setOngoing(true)
+
+            if (!status.isNullOrEmpty()) {
+                builder.setContentText(status)
+            }
+
+            return builder.build()
+        }
 
         @JvmStatic
         fun start(context: Context) {
@@ -312,6 +429,8 @@ class WatchdogService : Service() {
         @JvmStatic
         fun stop(context: Context) {
             context.stopService(Intent(context, WatchdogService::class.java))
+            val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+            nm?.cancel(NOTIFICATION_ID_WATCHDOG)
         }
 
         @JvmStatic

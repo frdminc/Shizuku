@@ -743,7 +743,8 @@ class ShizukuApplication :
         try {
             initializeManagers()
             initPeerSettingsSync()
-            if (ShizukuSettings.getWatchdog() && ShizukuSettings.isLiveActivityEnabled()) {
+            // When Watchdog is on, WatchdogService carries the live notification (1001) (#33)
+            if (!ShizukuSettings.getWatchdog() && ShizukuSettings.isLiveActivityEnabled()) {
                 try {
                     // startForegroundService() is required on API 26+ to start from background;
                     // plain startService() throws BackgroundServiceStartNotAllowedException on API 31+.

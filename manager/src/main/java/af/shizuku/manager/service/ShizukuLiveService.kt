@@ -1,5 +1,6 @@
 package af.shizuku.manager.service
 
+import af.shizuku.manager.ShizukuSettings
 import af.shizuku.manager.utils.LiveActivityNotificationManager
 import af.shizuku.manager.utils.ShizukuStateMachine
 import android.app.Notification
@@ -15,6 +16,9 @@ import timber.log.Timber
 class ShizukuLiveService : Service() {
     private val serviceScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
 
+    // Set once onStartCommand has reached startForeground(). Main thread only.
+    private var startCommandHandled = false
+
     companion object {
         private const val TAG = "ShizukuLiveService"
     }
@@ -26,6 +30,19 @@ class ShizukuLiveService : Service() {
             ShizukuStateMachine.asFlow().collect { state ->
                 val isRunning = state == ShizukuStateMachine.State.RUNNING
                 if (isRunning) {
+                    // The Watchdog owns the notification while it is on or running, so posting
+                    // 9999 here would leave a second persistent notification behind. Stop only
+                    // once onStartCommand has reached startForeground(): this collector is
+                    // posted to the main looper and can run before onStartCommand, and a
+                    // startForegroundService() start stopped before startForeground() crashes
+                    // the app on API 26+. Before that, onStartCommand makes the same check.
+                    if (ShizukuSettings.getWatchdog() || WatchdogService.isRunning()) {
+                        if (startCommandHandled) {
+                            removeForegroundNotification()
+                            stopSelf()
+                        }
+                        return@collect
+                    }
                     val notif =
                         LiveActivityNotificationManager.buildNotification(
                             this@ShizukuLiveService,
@@ -45,12 +62,7 @@ class ShizukuLiveService : Service() {
                         Timber.tag(TAG).w(e, "startForeground refused on state update")
                     }
                 } else {
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                        stopForeground(STOP_FOREGROUND_REMOVE)
-                    } else {
-                        @Suppress("DEPRECATION")
-                        stopForeground(true)
-                    }
+                    removeForegroundNotification()
                 }
             }
         }
@@ -69,20 +81,33 @@ class ShizukuLiveService : Service() {
                 this,
                 if (isRunning) "System Bridge Active" else "Monitoring...",
             )
+        // Even when the Watchdog owns the notification now, startForeground() must be reached
+        // first: a startForegroundService() start that stops without it crashes the app on
+        // API 26+ (ForegroundServiceDidNotStartInTimeException).
         if (!startForegroundSafely(notif)) {
+            stopSelf()
+            return START_NOT_STICKY
+        }
+        startCommandHandled = true
+        if (ShizukuSettings.getWatchdog() || WatchdogService.isRunning()) {
+            removeForegroundNotification()
             stopSelf()
             return START_NOT_STICKY
         }
         // If not running, remove the foreground notification immediately — service stays alive silently.
         if (!isRunning) {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                stopForeground(STOP_FOREGROUND_REMOVE)
-            } else {
-                @Suppress("DEPRECATION")
-                stopForeground(true)
-            }
+            removeForegroundNotification()
         }
         return START_STICKY
+    }
+
+    private fun removeForegroundNotification() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+        } else {
+            @Suppress("DEPRECATION")
+            stopForeground(true)
+        }
     }
 
     // Returns false when the platform refuses the FGS notification (CannotPostForegroundService-

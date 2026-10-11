@@ -2,6 +2,8 @@ package af.shizuku.manager.utils
 
 import af.shizuku.manager.MainActivity
 import af.shizuku.manager.R
+import af.shizuku.manager.ShizukuSettings
+import af.shizuku.manager.service.WatchdogService
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.Context
@@ -61,6 +63,10 @@ object LiveActivityNotificationManager {
         context: Context,
         status: String,
     ) {
+        if (ShizukuSettings.getWatchdog() || WatchdogService.isRunning()) {
+            WatchdogService.updateLiveStatus(context, status)
+            return
+        }
         val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         manager.notify(NOTIFICATION_ID, buildNotification(context, status))
     }
@@ -68,5 +74,8 @@ object LiveActivityNotificationManager {
     fun dismiss(context: Context) {
         val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         manager.cancel(NOTIFICATION_ID)
+        if (WatchdogService.isRunning()) {
+            WatchdogService.updateLiveStatus(context, null)
+        }
     }
 }

@@ -3,6 +3,7 @@ package af.shizuku.manager;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.ContextWrapper;
+import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
@@ -686,6 +687,15 @@ public class ShizukuSettings {
             WatchdogService.start(context);
             af.shizuku.manager.receiver.WatchdogAlarmReceiver.schedule(context);
         } else {
+            // Dismiss the live notification before stopping the Watchdog service: while that
+            // service still runs, dismiss() re-posts 1001 (without the live text) through
+            // WatchdogService.updateLiveStatus, and the stop right after removes 1001 for good
+            // (#34). The other order leaves 1001 up until the service's asynchronous destroy.
+            try {
+                context.stopService(new Intent(context, af.shizuku.manager.service.ShizukuLiveService.class));
+                af.shizuku.manager.utils.LiveActivityNotificationManager.INSTANCE.dismiss(context);
+            } catch (Exception ignored) {
+            }
             WatchdogService.stop(context);
             af.shizuku.manager.receiver.WatchdogAlarmReceiver.cancel(context);
         }
