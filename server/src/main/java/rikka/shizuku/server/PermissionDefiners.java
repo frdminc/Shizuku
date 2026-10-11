@@ -91,7 +91,11 @@ final class PermissionDefiners {
             String packageName = permissionInfo.packageName;
             // Permission definitions are global; resolve their owner in the manager's user (0).
             PackageInfo pi = Android17Compat.getPackageInfo(packageName, ManagerFlavours.signerFlags(), 0);
-            if (pi == null || pi.applicationInfo == null || !packageName.equals(pi.packageName)
+            if (pi == null) {
+                // The permission has a definer, so a package read that answers nothing failed.
+                return null;
+            }
+            if (pi.applicationInfo == null || !packageName.equals(pi.packageName)
                     || UserHandleCompat.getUserId(pi.applicationInfo.uid) != 0
                     || (pi.applicationInfo.flags & ApplicationInfo.FLAG_INSTALLED) == 0) {
                 return false;
@@ -100,8 +104,14 @@ final class PermissionDefiners {
             // package, even when it is the secondary manager, must be signed like it.
             boolean manager = ServerConstants.MANAGER_APPLICATION_ID.equals(packageName)
                     && isManagerAppId.test(UserHandleCompat.getAppId(pi.applicationInfo.uid));
-            boolean trustedSigner = !manager && ManagerFlavours.otherApplicationId().equals(packageName)
-                    && ManagerFlavours.signedLikeManager(pi);
+            boolean trustedSigner = false;
+            if (!manager && ManagerFlavours.otherApplicationId().equals(packageName)) {
+                Boolean alike = ManagerFlavours.signedLikeManager(pi);
+                if (alike == null) {
+                    return null;
+                }
+                trustedSigner = alike;
+            }
             return isTrustedDefiner(packageName, true, manager, trustedSigner);
         } catch (Throwable ignored) {
             return null;

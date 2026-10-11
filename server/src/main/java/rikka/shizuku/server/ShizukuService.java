@@ -121,8 +121,7 @@ public class ShizukuService extends Service<ShizukuUserServiceManager, ShizukuCl
 
     /**
      * The manager package in user 0, or null when it cannot be found now. Only the flavor chosen
-     * at start-up (ManagerFlavours.chooseAtStartUp) is looked up: a lookup that fails never makes
-     * another package name the manager.
+     * at start-up (ManagerFlavours.chooseAtStartUp) is looked up.
      */
     public static ApplicationInfo getManagerApplicationInfo() {
         try {
@@ -144,6 +143,9 @@ public class ShizukuService extends Service<ShizukuUserServiceManager, ShizukuCl
     // uid of the OTHER manager flavor (Plus vs Drop-In) when it is also installed and signed like
     // the manager or by a trusted key; -1 otherwise. See ManagerFlavours and isManagerAppId().
     private volatile int secondaryManagerAppId;
+    // The other flavor's APK being watched, and the listener that re-resolves it when it changes.
+    private String watchedSecondaryApk;
+    private ApkChangedListener secondaryApkListener;
     // uptimeMillis of the last on-demand manager-appId re-resolve (throttle; see checkCallerManagerPermission).
     private volatile long lastManagerAppIdRefresh;
     private final VirtualMachineManagerImpl virtualMachineManager = new VirtualMachineManagerImpl();
@@ -213,8 +215,9 @@ public class ShizukuService extends Service<ShizukuUserServiceManager, ShizukuCl
             };
             for (String pkg : managerIds) {
                 if (pkg == null) continue;
-                // The other flavor's package only when it is signed like the manager.
-                if (!pkg.equals(MANAGER_APPLICATION_ID) && secondaryManagerAppId == -1) continue;
+                // The other flavor's package only while it is signed like the manager, checked
+                // again now.
+                if (!pkg.equals(MANAGER_APPLICATION_ID) && !recheckSecondaryManager()) continue;
                 try {
                     Android17Compat.grantRuntimePermission(pkg, WRITE_SECURE_SETTINGS, userId);
                     Android17Compat.grantRuntimePermission(pkg, "android.permission.DUMP", userId);
@@ -329,9 +332,9 @@ public class ShizukuService extends Service<ShizukuUserServiceManager, ShizukuCl
         // ever picks ONE as MANAGER_APPLICATION_ID, so if the other flavor is also installed, its
         // clients would otherwise fail every checkCallerManagerPermission() check with "is not
         // manager" (SHIZUKUPLUS-7C) even though it's the developer's own signed app, not a third
-        // party. Track its uid too so isManagerAppId() can trust either, but only when it is signed
-        // like the manager: any app can be installed under the other flavor's package name.
-        secondaryManagerAppId = ManagerFlavours.secondaryManagerUid();
+        // party. Track its uid too so isManagerAppId() can trust either; the other flavor counts
+        // only while it is signed like the manager.
+        applySecondaryManager(ManagerFlavours.resolveSecondary(), false);
 
         configManager = getConfigManager();
         clientManager = getClientManager();
@@ -452,7 +455,7 @@ public class ShizukuService extends Service<ShizukuUserServiceManager, ShizukuCl
             if (primary == null) return false;
             if (appId == UserHandleCompat.getAppId(primary.uid)) return true;
             int secondary = ManagerFlavours.secondaryManagerUid();
-            return secondary != -1 && appId == UserHandleCompat.getAppId(secondary);
+            return secondary >= 0 && appId == UserHandleCompat.getAppId(secondary);
         });
     }
 
@@ -477,7 +480,8 @@ public class ShizukuService extends Service<ShizukuUserServiceManager, ShizukuCl
     private boolean isManagerAppId(int appId) {
         int cleanAppId = UserHandleCompat.getAppId(appId);
         int cleanManagerAppId = UserHandleCompat.getAppId(managerAppId);
-        int cleanSecondaryAppId = secondaryManagerAppId != -1 ? UserHandleCompat.getAppId(secondaryManagerAppId) : -1;
+        int secondary = secondaryManagerAppId;
+        int cleanSecondaryAppId = secondary >= 0 ? UserHandleCompat.getAppId(secondary) : -1;
         return cleanAppId == cleanManagerAppId || (cleanSecondaryAppId != -1 && cleanAppId == cleanSecondaryAppId);
     }
 
@@ -495,9 +499,51 @@ public class ShizukuService extends Service<ShizukuUserServiceManager, ShizukuCl
             return false;
         }
         managerAppId = ai.uid;
-        secondaryManagerAppId = ManagerFlavours.secondaryManagerUid();
+        applySecondaryManager(ManagerFlavours.resolveSecondary(), true);
         LOGGER.i("Re-resolved manager appId=%d secondary=%d", managerAppId, secondaryManagerAppId);
         return true;
+    }
+
+    /**
+     * Records what resolving the other flavor found and watches its APK, so a change re-resolves
+     * it. A result that could not be read keeps the current value when {@code keepOnUnknown}
+     * (a refresh), and clears it otherwise (start-up, or after its APK changed).
+     */
+    private synchronized void applySecondaryManager(ManagerFlavours.Secondary found, boolean keepOnUnknown) {
+        if (found.uid == ManagerFlavours.UNKNOWN) {
+            if (keepOnUnknown) {
+                return;
+            }
+            secondaryManagerAppId = -1;
+        } else {
+            secondaryManagerAppId = found.uid;
+        }
+        String apk = secondaryManagerAppId >= 0 ? found.sourceDir : null;
+        if (apk != null && apk.equals(watchedSecondaryApk)) {
+            return;
+        }
+        if (secondaryApkListener == null) {
+            secondaryApkListener = this::onSecondaryApkChanged;
+        }
+        ApkChangedObservers.stop(secondaryApkListener);
+        watchedSecondaryApk = apk;
+        if (apk != null) {
+            ApkChangedObservers.start(apk, secondaryApkListener);
+        }
+    }
+
+    private void onSecondaryApkChanged() {
+        synchronized (this) {
+            watchedSecondaryApk = null;
+        }
+        applySecondaryManager(ManagerFlavours.resolveSecondary(), false);
+    }
+
+    /** Resolves the other flavor again; true when it counts as the manager now. */
+    private boolean recheckSecondaryManager() {
+        ManagerFlavours.Secondary found = ManagerFlavours.resolveSecondary();
+        applySecondaryManager(found, true);
+        return found.uid >= 0;
     }
 
     private int checkCallingPermission() {

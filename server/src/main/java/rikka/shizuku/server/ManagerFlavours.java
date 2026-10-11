@@ -19,9 +19,8 @@ import rikka.shizuku.server.util.Logger;
 /**
  * The manager ships as two flavours under two package names, and a user can have both installed.
  * The server runs for one of them ({@link ServerConstants#MANAGER_APPLICATION_ID}); the other
- * flavour's package name says nothing about who built it, since any app can be installed under it
- * when the real one is absent. It counts as the manager only when it is signed by the manager's
- * own key, or by a key in {@link TrustedSigners}. Signers that cannot be read count as neither.
+ * flavour counts as the manager only while it is signed like the manager: by the manager's own
+ * key, or by a key in {@link TrustedSigners}.
  */
 final class ManagerFlavours {
 
@@ -36,16 +35,14 @@ final class ManagerFlavours {
 
     /**
      * Chooses, once at start-up, which flavour the server runs for, and sets
-     * {@link ServerConstants#MANAGER_APPLICATION_ID} to it. Nothing changes it afterwards: a later
-     * lookup that fails leaves the manager unchanged and is tried again later, so a package
-     * manager that does not answer for a moment never makes another package name the manager.
+     * {@link ServerConstants#MANAGER_APPLICATION_ID} to it. Nothing changes it afterwards; a later
+     * lookup that fails leaves the manager unchanged and is tried again later.
      *
      * <p>The manager is the installed flavour whose APK started this server: {@code classPath}, the
      * APK the starter ran (the manager's own sourceDir, passed with --apk, or else the base.apk
-     * beside the starter or {@code pm path}), equals its sourceDir. A package name alone decides
-     * nothing: any app can be installed under the name of a flavour that is absent. When neither
-     * flavour matches, the lookups are retried a few times for a package manager still coming up,
-     * then the server gives up rather than guess.
+     * beside the starter or {@code pm path}), equals its sourceDir. When neither flavour matches,
+     * the lookups are retried a few times for a package manager still coming up, then the server
+     * exits.
      *
      * @return false when no installed flavour started the server; the server then exits
      */
@@ -94,37 +91,66 @@ final class ManagerFlavours {
                 ? PackageManager.GET_SIGNING_CERTIFICATES : PackageManager.GET_SIGNATURES;
     }
 
-    /**
-     * The uid of the other flavour's package in user 0 when it may act as the manager, or -1 when
-     * it is not installed, is signed by another key, or its signers cannot be read.
-     */
+    /** {@link Secondary#uid} when the other flavour's package or signers could not be read. */
+    static final int UNKNOWN = -2;
+
+    /** What resolving the other flavour's package found. */
+    static final class Secondary {
+        /** Its uid when it counts as the manager; -1 when absent or signed otherwise; {@link #UNKNOWN}. */
+        final int uid;
+        /** Its APK, when it counts as the manager. */
+        @Nullable
+        final String sourceDir;
+
+        Secondary(int uid, @Nullable String sourceDir) {
+            this.uid = uid;
+            this.sourceDir = sourceDir;
+        }
+    }
+
+    /** {@link #resolveSecondary()}'s uid. */
     static int secondaryManagerUid() {
+        return resolveSecondary().uid;
+    }
+
+    /**
+     * The other flavour's package in user 0: its uid when it is signed like the manager, -1 when
+     * it is not installed or is signed by another key, {@link #UNKNOWN} when its package or the
+     * signers to compare could not be read. A package read that answers nothing counts as not
+     * installed: the package manager call used here cannot tell the two apart.
+     */
+    static Secondary resolveSecondary() {
         String other = otherApplicationId();
         PackageInfo pi;
         try {
             pi = Android17Compat.getPackageInfo(other, signerFlags(), 0);
         } catch (Throwable t) {
-            LOGGER.w(t, "cannot read %s; not treating it as the manager", other);
-            return -1;
+            LOGGER.w(t, "cannot read %s", other);
+            return new Secondary(UNKNOWN, null);
         }
         if (pi == null || pi.applicationInfo == null) {
-            return -1;
+            return new Secondary(-1, null);
         }
-        if (!signedLikeManager(pi)) {
-            LOGGER.w("%s is installed but not signed like %s; not treating it as the manager",
-                    other, ServerConstants.MANAGER_APPLICATION_ID);
-            return -1;
+        Boolean alike = signedLikeManager(pi);
+        if (alike == null) {
+            LOGGER.w("cannot compare the signers of %s with %s", other, ServerConstants.MANAGER_APPLICATION_ID);
+            return new Secondary(UNKNOWN, null);
         }
-        return pi.applicationInfo.uid;
+        if (!alike) {
+            LOGGER.w("%s is not signed like %s; it is not the manager", other, ServerConstants.MANAGER_APPLICATION_ID);
+            return new Secondary(-1, null);
+        }
+        return new Secondary(pi.applicationInfo.uid, pi.applicationInfo.sourceDir);
     }
 
     /**
-     * True when {@code pi}, read with {@link #signerFlags()}, is signed by a trusted key or by
-     * exactly the manager's signers. False on any read that fails.
+     * Whether {@code pi}, read with {@link #signerFlags()}, is signed by a trusted key or by
+     * exactly the manager's signers; null when its signers or the manager's could not be read.
      */
-    static boolean signedLikeManager(@Nullable PackageInfo pi) {
+    @Nullable
+    static Boolean signedLikeManager(@Nullable PackageInfo pi) {
         if (pi == null) {
-            return false;
+            return null;
         }
         try {
             if (TrustedSigners.isSignedByTrustedKey(pi)) {
@@ -132,14 +158,17 @@ final class ManagerFlavours {
             }
             Set<String> theirs = signerDigests(pi);
             if (theirs == null) {
-                return false;
+                return null;
             }
             PackageInfo manager = Android17Compat.getPackageInfo(ServerConstants.MANAGER_APPLICATION_ID, signerFlags(), 0);
             Set<String> ours = signerDigests(manager);
+            if (ours == null) {
+                return null;
+            }
             return theirs.equals(ours);
         } catch (Throwable t) {
             LOGGER.w(t, "cannot compare the signers of %s with the manager's", pi.packageName);
-            return false;
+            return null;
         }
     }
 

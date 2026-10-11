@@ -349,6 +349,50 @@ class PermissionDefinerConsentTest {
     }
 
     @Test
+    fun `the other flavour's package replaced by one signed by another key is granted nothing and is not the manager`() {
+        // Resolved as the manager's own build at start-up, then replaced under the same name and
+        // app id by a package signed by another key while the server runs.
+        installOtherFlavour(THEIRS)
+        for (serverUid in serverUids) {
+            val service = newService(serverUid, secondaryManagerUid = OTHER_FLAVOUR_UID)
+            attach(service, MANAGER_PACKAGE, MANAGER_UID, MANAGER_PID)
+            assertFalse(service.checkCallerManagerPermission("exit", OTHER_FLAVOUR_UID, OTHER_FLAVOUR_PID), "server uid $serverUid")
+        }
+        verify(exactly = 0) { Android17Compat.grantRuntimePermission(OTHER_FLAVOUR_PACKAGE, any(), any()) }
+        verify { Android17Compat.grantRuntimePermission(MANAGER_PACKAGE, android.Manifest.permission.WRITE_SECURE_SETTINGS, any()) }
+    }
+
+    @Test
+    fun `a refresh that cannot read the other flavour's signers keeps it as the manager`() {
+        installOtherFlavour(OURS)
+        mockkStatic(SystemClock::class)
+        every { SystemClock.uptimeMillis() } returns 60_000L
+        val service = newService(SHELL_UID, secondaryManagerUid = OTHER_FLAVOUR_UID)
+        every { Android17Compat.getPackageInfo(OTHER_FLAVOUR_PACKAGE, any(), 0) } throws IllegalStateException("package manager not answering")
+        // A failed manager check from another uid runs the refresh.
+        assertFalse(service.checkCallerManagerPermission("exit", APP_UID, APP_PID))
+        assertTrue(service.checkCallerManagerPermission("exit", OTHER_FLAVOUR_UID, OTHER_FLAVOUR_PID))
+    }
+
+    @Test
+    fun `a definer package read that failed is asked again on the next call`() {
+        every { ActivityManagerApis.checkPermission(ServerConstants.PERMISSION, any(), APP_UID) } returns PackageManager.PERMISSION_GRANTED
+        callingUid = APP_UID
+        callingPid = APP_PID
+        // The definer's own package, and the manager's package read to compare signers with.
+        for (failing in listOf(MANAGER_PACKAGE, OTHER_FLAVOUR_PACKAGE)) {
+            installOtherFlavour(OURS)
+            definerPackage = if (failing == MANAGER_PACKAGE) OTHER_FLAVOUR_PACKAGE else failing
+            val readable = Android17Compat.getPackageInfo(failing, 0L, 0)
+            every { Android17Compat.getPackageInfo(failing, any(), 0) } returns null
+            val service = newService(SHELL_UID)
+            assertFalse(service.checkCallerPermission("newProcess", APP_UID, APP_PID, null), failing)
+            every { Android17Compat.getPackageInfo(failing, any(), 0) } returns readable
+            assertTrue(service.checkCallerPermission("newProcess", APP_UID, APP_PID, null), failing)
+        }
+    }
+
+    @Test
     fun `a permission the other flavour's package defines counts only when the manager's key signs it`() {
         every { Android17Compat.getPackageInfo(APP_PACKAGE, any(), any()) } returns
             PackageInfo().apply { requestedPermissions = heldPermissionNames }

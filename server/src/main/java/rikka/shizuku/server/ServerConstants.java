@@ -9,10 +9,9 @@ public class ServerConstants {
     public static final String PERMISSION_ORIGINAL = "moe.shizuku.manager.permission.API_V23";
 
     // Both the Plus and Drop-In flavors share this same server binary but ship under different
-    // application ids. This defaults to the Plus id; ShizukuService.getManagerApplicationInfo()
-    // corrects it at startup to whichever flavor is actually installed, since a Drop-In-only
-    // install would otherwise never find "the manager app" and exit(MANAGER_APP_NOT_FOUND)
-    // immediately. Not final so that correction can take effect everywhere this is read.
+    // application ids. This defaults to the Plus id; ManagerFlavours.chooseAtStartUp() sets it
+    // once, at start-up, to the installed flavor whose APK started the server, and nothing changes
+    // it afterwards. Not final so that choice takes effect everywhere this is read.
     public static String MANAGER_APPLICATION_ID = "af.shizuku.plus.api";
     public static final String PLUS_APPLICATION_ID = "af.shizuku.plus.api";
     public static final String DROPIN_APPLICATION_ID = "moe.shizuku.privileged.api";
