@@ -27,6 +27,7 @@ object SettingsBackupManager {
             ShizukuSettings.Keys.KEY_LAST_SEEN_VERSION,
             ShizukuSettings.Keys.KEY_LAST_SEEN_CHANGELOG_VERSION,
             ShizukuSettings.Keys.KEY_SYNCED_START_ON_BOOT_DEFAULT,
+            ShizukuSettings.Keys.KEY_WATCHDOG_DEFAULT,
             // Ephemeral runtime state
             ShizukuSettings.Keys.KEY_SENTRY_LIMIT_REACHED,
             ShizukuSettings.Keys.KEY_SERVER_STARTED_BUILD,
@@ -109,6 +110,12 @@ object SettingsBackupManager {
                         editor.putStringSet(key, set)
                     }
                 }
+            }
+            // A backup with no Watchdog setting is from a build that read absent as off (or from a
+            // new install before its first server start): restore that off, rather than let this
+            // install's pending new-install default turn the Watchdog on at its first start.
+            if (!obj.has(ShizukuSettings.Keys.KEY_WATCHDOG) && !prefs.contains(ShizukuSettings.Keys.KEY_WATCHDOG)) {
+                editor.putBoolean(ShizukuSettings.Keys.KEY_WATCHDOG, false)
             }
             if (synchronous) {
                 editor.commit()

@@ -135,7 +135,10 @@ object ShizukuStateMachine {
                 startingTimestamp.set(System.currentTimeMillis())
                 pendingStart.set(PendingStart(currentBinder()))
             }
-            if (newState == State.RUNNING) recordIfNewServer()
+            if (newState == State.RUNNING) {
+                recordIfNewServer()
+                applyWatchdogDefault()
+            }
 
             // After the bookkeeping above: a RUNNING listener (HomeActivity's version-skew check)
             // must see the build this start recorded, or it offers a "restart" that stops the new
@@ -215,6 +218,21 @@ object ShizukuStateMachine {
             } catch (_: UninitializedPropertyAccessException) {
                 Timber.tag("ShizukuStateMachine").w("Skipping broadcast: appContext not initialized yet")
             }
+        }
+    }
+
+    /**
+     * A new install's Watchdog default turns on with its first server, so that until a server has
+     * run the watchdog starts nothing and shows nothing (see ShizukuSettings.decideWatchdogDefault).
+     */
+    private fun applyWatchdogDefault() {
+        try {
+            val context = ShizukuApplication.appContext
+            if (ShizukuSettings.applyWatchdogDefaultOnFirstRun(context)) {
+                ManagerActivityLog.log(context, "Watchdog: turned on with the first server start (the default for a new install)")
+            }
+        } catch (e: Exception) {
+            Timber.tag("ShizukuStateMachine").w(e, "Failed to apply the new-install Watchdog default")
         }
     }
 

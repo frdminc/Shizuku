@@ -4,6 +4,7 @@ import android.content.ComponentName;
 import android.content.Context;
 import android.content.ContextWrapper;
 import android.content.SharedPreferences;
+import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.os.Build;
 import android.provider.Settings;
@@ -32,6 +33,7 @@ public class ShizukuSettings {
         public static final String KEY_START_ON_BOOT = "start_on_boot";
         public static final String KEY_SYNCED_START_ON_BOOT_DEFAULT = "synced_start_on_boot_default";
         public static final String KEY_WATCHDOG = "watchdog";
+        public static final String KEY_WATCHDOG_DEFAULT = "watchdog_default";
         public static final String KEY_TCP_MODE = "tcp_mode";
         public static final String KEY_TCP_PORT = "tcp_port";
         public static final String KEY_LAST_PORT = "last_adb_port";
@@ -562,8 +564,117 @@ public class ShizukuSettings {
         prefs.edit().putBoolean(Keys.KEY_SYNCED_START_ON_BOOT_DEFAULT, true).apply();
     }
 
+    /**
+     * Absent reads as off, as in every earlier build: a new install's default is on, but it is
+     * stored only at its first server start ({@link #decideWatchdogDefaultIfNeeded}). The switch in
+     * settings_behavior.xml has no android:defaultValue and is not persistent, so it agrees.
+     */
     public static boolean getWatchdog() {
         return getPreferences().getBoolean(Keys.KEY_WATCHDOG, false);
+    }
+
+    /** {@link Keys#KEY_WATCHDOG_DEFAULT}: a new install; the Watchdog turns on with its first server. */
+    private static final String WATCHDOG_DEFAULT_PENDING = "pending";
+    /** {@link Keys#KEY_WATCHDOG_DEFAULT}: decided (an update, a stored or restored choice, or applied). */
+    private static final String WATCHDOG_DEFAULT_SETTLED = "settled";
+
+    /**
+     * Keys an earlier build writes without the user doing anything: the launch mode and the
+     * server's state at its first start, the one-time migrations and the seen version at every
+     * launch. Any of them means these settings are not a new install's, whatever the package's
+     * install times say (data kept across an uninstall, or a backup restored before the first
+     * launch).
+     */
+    private static final String[] EARLIER_BUILD_KEYS = {
+        "mode",
+        "onboarding_seen",
+        Keys.KEY_LAST_SETTLED_STATE,
+        Keys.KEY_SERVER_STARTED_BUILD,
+        Keys.KEY_SYNCED_START_ON_BOOT_DEFAULT,
+        Keys.KEY_MIGRATED_APPCOMPAT_LOCALES,
+        Keys.KEY_LAST_SEEN_VERSION,
+    };
+
+    /**
+     * The Watchdog is on by default for new installs only. Builds before this one read an absent
+     * setting as off, so an install updated from one, where the user never touched the switch, is
+     * given an explicit off and keeps the behaviour it had; a stored value (the user's, a fleet
+     * profile's, a restored backup's) is never changed. A new install is marked pending and turns
+     * the Watchdog on at its first server start ({@link #applyWatchdogDefaultOnFirstRun}), not
+     * now: until a server has run there is nothing to restart, and the service would only post its
+     * notification. Call once at app start, before anything reads {@link #getWatchdog()}, and
+     * before the start-up code writes any of {@link #EARLIER_BUILD_KEYS}.
+     */
+    public static void decideWatchdogDefaultIfNeeded(Context context) {
+        try {
+            SharedPreferences prefs = getPreferences();
+            if (prefs == null || prefs.contains(Keys.KEY_WATCHDOG_DEFAULT)) return;
+            decideWatchdogDefault(isUpgradedInstall(context));
+        } catch (Exception e) {
+            // Undecided reads as off (the old default) and is decided at the next start.
+            Timber.w(e, "Watchdog default: could not decide");
+        }
+    }
+
+    /** The decision itself; {@code upgraded} is {@link #isUpgradedInstall}'s answer. */
+    @VisibleForTesting
+    public static void decideWatchdogDefault(boolean upgraded) {
+        SharedPreferences prefs = getPreferences();
+        if (prefs == null || prefs.contains(Keys.KEY_WATCHDOG_DEFAULT)) return;
+        SharedPreferences.Editor editor = prefs.edit();
+        if (prefs.contains(Keys.KEY_WATCHDOG)) {
+            editor.putString(Keys.KEY_WATCHDOG_DEFAULT, WATCHDOG_DEFAULT_SETTLED);
+        } else if (upgraded || hasEarlierBuildSettings(prefs)) {
+            editor.putBoolean(Keys.KEY_WATCHDOG, false);
+            editor.putString(Keys.KEY_WATCHDOG_DEFAULT, WATCHDOG_DEFAULT_SETTLED);
+        } else {
+            editor.putString(Keys.KEY_WATCHDOG_DEFAULT, WATCHDOG_DEFAULT_PENDING);
+        }
+        editor.apply();
+    }
+
+    private static boolean hasEarlierBuildSettings(SharedPreferences prefs) {
+        for (String key : EARLIER_BUILD_KEYS) {
+            if (prefs.contains(key)) return true;
+        }
+        return false;
+    }
+
+    /** A new install still waiting for its first server to turn the Watchdog on. */
+    public static boolean isWatchdogDefaultPending() {
+        SharedPreferences p = getPreferences();
+        return p != null
+            && !p.contains(Keys.KEY_WATCHDOG)
+            && WATCHDOG_DEFAULT_PENDING.equals(p.getString(Keys.KEY_WATCHDOG_DEFAULT, null));
+    }
+
+    /**
+     * Called on every transition to RUNNING: a new install whose Watchdog default is pending turns
+     * the Watchdog on now, once. A choice the user made before the first start (the switch, a fleet
+     * profile, an imported backup) stored a value and is kept. Returns whether it turned it on.
+     */
+    public static synchronized boolean applyWatchdogDefaultOnFirstRun(Context context) {
+        SharedPreferences prefs = getPreferences();
+        if (prefs == null || !WATCHDOG_DEFAULT_PENDING.equals(prefs.getString(Keys.KEY_WATCHDOG_DEFAULT, null))) {
+            return false;
+        }
+        prefs.edit().putString(Keys.KEY_WATCHDOG_DEFAULT, WATCHDOG_DEFAULT_SETTLED).apply();
+        if (prefs.contains(Keys.KEY_WATCHDOG)) return false;
+        setWatchdog(context, true);
+        return true;
+    }
+
+    /**
+     * Whether the package was updated since it was installed (an install over an earlier build);
+     * both times are equal on a new install. Unknown counts as updated, which keeps the old default.
+     */
+    public static boolean isUpgradedInstall(Context context) {
+        try {
+            PackageInfo info = context.getPackageManager().getPackageInfo(context.getPackageName(), 0);
+            return info.lastUpdateTime != info.firstInstallTime;
+        } catch (Exception e) {
+            return true;
+        }
     }
 
     public static boolean isWatchdogRunning() {

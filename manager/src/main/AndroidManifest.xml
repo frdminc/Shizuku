@@ -360,7 +360,7 @@
                     This prevents the other apps from functioning properly.
                     The watchdog service would ensure the API is always available for the apps to use.
                     The watchdog service uses minimal resources and battery. There is no constant polling; it only reacts when the API service stops unexpectedly.
-                    The watchdog service is opt-in and toggleable via settings, so users can choose to disable it at any time if not desired." />
+                    The watchdog service is on by default for new installs from the first time the API service is started (an update keeps the previous setting), and toggleable via settings, so users can choose to disable it at any time if not desired." />
         </service>
 
         <receiver

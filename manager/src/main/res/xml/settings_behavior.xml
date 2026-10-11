@@ -14,8 +14,14 @@
             android:summary="@string/settings_start_on_boot_summary"
             android:icon="@drawable/ic_power_settings_new_24" />
 
+        <!-- Not persistent: the fragment sets the switch from the service's state, and a persisted
+             switch wrote that state back as the setting, an off that cancelled a new install's
+             pending default (and a stored on while the service was down). ShizukuSettings.setWatchdog
+             stores the user's choice. No android:defaultValue: absent reads as off, as getWatchdog()
+             does; a new install's on is stored at its first server start. -->
         <af.shizuku.manager.settings.GrayableIconSwitchPreference
             android:key="watchdog"
+            android:persistent="false"
             android:summary="@string/settings_watchdog_summary"
             android:title="@string/settings_watchdog"
             android:icon="@drawable/ic_visibility_24" />

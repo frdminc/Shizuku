@@ -643,6 +643,12 @@ class ShizukuApplication :
         ThemeDelegateManager.setDelegate(ThemeDelegateImpl())
         super.onCreate()
 
+        // First, before the start-up code below writes any of the keys an earlier build leaves
+        // behind (the seen version, the one-time migrations) and before anything reads the
+        // Watchdog setting: tells a new install (Watchdog on at its first server start) from an
+        // update (keeps the off an absent setting meant). See decideWatchdogDefaultIfNeeded().
+        ShizukuSettings.decideWatchdogDefaultIfNeeded(this)
+
         // 0. Initialize Timber
         if (BuildConfig.DEBUG) {
             Timber.plant(Timber.DebugTree())
