@@ -384,12 +384,52 @@ class PermissionDefinerConsentTest {
             installOtherFlavour(OURS)
             definerPackage = if (failing == MANAGER_PACKAGE) OTHER_FLAVOUR_PACKAGE else failing
             val readable = Android17Compat.getPackageInfo(failing, 0L, 0)
-            every { Android17Compat.getPackageInfo(failing, any(), 0) } returns null
+            if (failing == MANAGER_PACKAGE) {
+                every { Android17Compat.getPackageInfo(failing, any(), 0) } returns null
+            } else {
+                every { Android17Compat.getPackageInfo(failing, any(), 0) } throws IllegalStateException("package manager not answering")
+            }
             val service = newService(SHELL_UID)
             assertFalse(service.checkCallerPermission("newProcess", APP_UID, APP_PID, null), failing)
             every { Android17Compat.getPackageInfo(failing, any(), 0) } returns readable
             assertTrue(service.checkCallerPermission("newProcess", APP_UID, APP_PID, null), failing)
         }
+    }
+
+    @Test
+    fun `a definer package missing from user 0 is denied for a second before it is read again`() {
+        // Permission definitions are global, but the definer is read in user 0, where this one
+        // is not installed.
+        every { ActivityManagerApis.checkPermission(ServerConstants.PERMISSION, any(), APP_UID) } returns PackageManager.PERMISSION_GRANTED
+        every { Android17Compat.getPackageInfo(OTHER_PACKAGE, any(), 0) } returns null
+        mockkStatic(SystemClock::class)
+        var now = 100_000L
+        every { SystemClock.uptimeMillis() } answers { now }
+        callingUid = APP_UID
+        callingPid = APP_PID
+        val service = newService(SHELL_UID)
+        repeat(5) { assertFalse(service.checkCallerPermission("newProcess", APP_UID, APP_PID, null)) }
+        verify(exactly = 1) { PermissionDefiners.getPermissionInfo(ServerConstants.PERMISSION) }
+
+        now += 1_000L
+        assertFalse(service.checkCallerPermission("newProcess", APP_UID, APP_PID, null))
+        verify(exactly = 2) { PermissionDefiners.getPermissionInfo(ServerConstants.PERMISSION) }
+    }
+
+    @Test
+    fun `the other flavour is granted manager permissions only under the uid its check found`() {
+        installOtherFlavour(OURS)
+        for (installedUid in listOf(OTHER_FLAVOUR_UID + 1, OTHER_FLAVOUR_UID)) {
+            // The package under the other flavour's name as the grant reads it, after the check.
+            every { Android17Compat.getApplicationInfo(OTHER_FLAVOUR_PACKAGE, any(), 0) } returns
+                ApplicationInfo().apply { uid = installedUid }
+            val service = newService(SHELL_UID, secondaryManagerUid = OTHER_FLAVOUR_UID)
+            attach(service, MANAGER_PACKAGE, MANAGER_UID, MANAGER_PID)
+            if (installedUid != OTHER_FLAVOUR_UID) {
+                verify(exactly = 0) { Android17Compat.grantRuntimePermission(OTHER_FLAVOUR_PACKAGE, any(), any()) }
+            }
+        }
+        verify { Android17Compat.grantRuntimePermission(OTHER_FLAVOUR_PACKAGE, android.Manifest.permission.WRITE_SECURE_SETTINGS, any()) }
     }
 
     @Test

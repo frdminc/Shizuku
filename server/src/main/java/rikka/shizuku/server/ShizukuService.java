@@ -216,8 +216,16 @@ public class ShizukuService extends Service<ShizukuUserServiceManager, ShizukuCl
             for (String pkg : managerIds) {
                 if (pkg == null) continue;
                 // The other flavor's package only while it is signed like the manager, checked
-                // again now.
-                if (!pkg.equals(MANAGER_APPLICATION_ID) && !recheckSecondaryManager()) continue;
+                // again now, and only under the uid that check found.
+                if (!pkg.equals(MANAGER_APPLICATION_ID)) {
+                    int checkedUid = recheckSecondaryManager();
+                    if (checkedUid < 0) continue;
+                    ApplicationInfo current = Android17Compat.getApplicationInfo(pkg, 0, userId);
+                    if (current == null || UserHandleCompat.getAppId(current.uid) != UserHandleCompat.getAppId(checkedUid)) {
+                        LOGGER.i("%s changed while it was checked; not granting it manager permissions", pkg);
+                        continue;
+                    }
+                }
                 try {
                     Android17Compat.grantRuntimePermission(pkg, WRITE_SECURE_SETTINGS, userId);
                     Android17Compat.grantRuntimePermission(pkg, "android.permission.DUMP", userId);
@@ -526,24 +534,29 @@ public class ShizukuService extends Service<ShizukuUserServiceManager, ShizukuCl
             secondaryApkListener = this::onSecondaryApkChanged;
         }
         ApkChangedObservers.stop(secondaryApkListener);
+        if (watchedSecondaryApk != null) {
+            LOGGER.i("stopped watching %s, the other manager flavor's APK", watchedSecondaryApk);
+        }
         watchedSecondaryApk = apk;
         if (apk != null) {
             ApkChangedObservers.start(apk, secondaryApkListener);
+            LOGGER.i("watching %s, the other manager flavor's APK", apk);
         }
     }
 
     private void onSecondaryApkChanged() {
+        LOGGER.i("the other manager flavor's APK changed; checking it again");
         synchronized (this) {
             watchedSecondaryApk = null;
         }
         applySecondaryManager(ManagerFlavours.resolveSecondary(), false);
     }
 
-    /** Resolves the other flavor again; true when it counts as the manager now. */
-    private boolean recheckSecondaryManager() {
+    /** Resolves the other flavor again; its uid when it counts as the manager now, else negative. */
+    private int recheckSecondaryManager() {
         ManagerFlavours.Secondary found = ManagerFlavours.resolveSecondary();
         applySecondaryManager(found, true);
-        return found.uid >= 0;
+        return found.uid;
     }
 
     private int checkCallingPermission() {

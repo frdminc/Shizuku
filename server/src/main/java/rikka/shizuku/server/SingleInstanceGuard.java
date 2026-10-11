@@ -157,16 +157,20 @@ public final class SingleInstanceGuard {
                 fd = Os.open(path, OsConstants.O_RDWR | OsConstants.O_CREAT | OsConstants.O_NOFOLLOW
                         | OsConstants.O_CLOEXEC, 0660);
             } catch (ErrnoException | RuntimeException e) {
-                // A symbolic link (ELOOP), a directory, or no access: remove what is there once.
-                if (attempt == 0 && removeNonFile(path)) {
+                // A symbolic link or a directory is removed once; a regular file this server
+                // cannot open (no access) is left as it is, and the lock attempt reports it.
+                if (attempt == 0 && !isRegularFile(path) && removeNonFile(path)) {
                     continue;
                 }
                 return;
             }
             try {
                 StructStat st = Os.fstat(fd);
-                if (!isPlainFile(OsConstants.S_ISREG(st.st_mode), st.st_nlink, st.st_uid)) {
-                    if (attempt == 0 && removeNonFile(path)) {
+                boolean regular = OsConstants.S_ISREG(st.st_mode);
+                if (!isPlainFile(regular, st.st_nlink, st.st_uid)) {
+                    // Another node, or a second link to the file: replaced once. A regular file
+                    // owned by someone else is left as it is.
+                    if (attempt == 0 && (!regular || st.st_nlink != 1) && removeNonFile(path)) {
                         continue;
                     }
                     return;
@@ -186,6 +190,15 @@ public final class SingleInstanceGuard {
                 } catch (ErrnoException | RuntimeException ignored) {
                 }
             }
+        }
+    }
+
+    /** Whether lstat shows a regular file at {@code path}; true when it cannot tell. */
+    private static boolean isRegularFile(String path) {
+        try {
+            return OsConstants.S_ISREG(Os.lstat(path).st_mode);
+        } catch (ErrnoException | RuntimeException e) {
+            return true;
         }
     }
 
@@ -222,6 +235,8 @@ public final class SingleInstanceGuard {
         if (!isPlainFile(OsConstants.S_ISREG(before.st_mode), before.st_nlink, before.st_uid)) {
             throw new IOException(path + " is not a plain file");
         }
+        // RandomAccessFile opens with O_CREAT and follows a link; a path swapped after the lstat is
+        // caught by the dev/ino check below, which leaves the server unguarded, never chmodded.
         RandomAccessFile file = new RandomAccessFile(path, "rw");
         try {
             StructStat opened = Os.fstat(file.getFD());
