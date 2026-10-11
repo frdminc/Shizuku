@@ -269,29 +269,6 @@ int main(int argc, char *argv[]) {
     printf("info: starter begin\n");
     fflush(stdout);
 
-    // kill old server
-    printf("info: killing old process...\n");
-    fflush(stdout);
-
-    foreach_proc([](pid_t pid) {
-        if (pid == getpid()) return;
-
-        char name[1024];
-        if (get_proc_name(pid, name, 1024) != 0) return;
-
-        if (strcmp(SERVER_NAME, name) != 0)
-            return;
-
-        if (kill(pid, SIGKILL) == 0)
-            printf("info: killed %d (%s)\n", pid, name);
-        else if (errno == EPERM) {
-            perrorf("fatal: can't kill %d, please try to stop existing Shizuku from app first.\n", pid);
-            exit(EXIT_FATAL_KILL);
-        } else {
-            printf("warn: failed to kill %d (%s)\n", pid, name);
-        }
-    });
-
     if (access(apk_path.c_str(), R_OK) == 0) {
         printf("info: use apk path from argv\n");
         fflush(stdout);
@@ -358,6 +335,30 @@ int main(int argc, char *argv[]) {
         perrorf("fatal: can't access manager %s\n", apk_path.c_str());
         exit(EXIT_FATAL_PM_PATH);
     }
+
+    // Kill the old server only once the new one's APK is resolved and readable: a start that stops
+    // on a fatal error above leaves the running server alone.
+    printf("info: killing old process...\n");
+    fflush(stdout);
+
+    foreach_proc([](pid_t pid) {
+        if (pid == getpid()) return;
+
+        char name[1024];
+        if (get_proc_name(pid, name, 1024) != 0) return;
+
+        if (strcmp(SERVER_NAME, name) != 0)
+            return;
+
+        if (kill(pid, SIGKILL) == 0)
+            printf("info: killed %d (%s)\n", pid, name);
+        else if (errno == EPERM) {
+            perrorf("fatal: can't kill %d, please try to stop existing Shizuku from app first.\n", pid);
+            exit(EXIT_FATAL_KILL);
+        } else {
+            printf("warn: failed to kill %d (%s)\n", pid, name);
+        }
+    });
 
     printf("info: starting server...\n");
     fflush(stdout);

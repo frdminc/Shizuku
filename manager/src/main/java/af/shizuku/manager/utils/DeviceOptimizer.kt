@@ -79,10 +79,16 @@ object DeviceOptimizer {
             runCommand("appops set $pkgName GET_USAGE_STATS allow")
             runCommand("appops set $pkgName SCHEDULE_EXACT_ALARM allow")
 
-            // 5. Remove the copy of the starter earlier versions kept at /data/local/tmp/shizuku.
-            // Nothing runs it, and the starter finds the manager's APK from beside itself in the
-            // app's native library directory.
+            // 5. Remove the copy of the starter earlier versions kept at /data/local/tmp/shizuku,
+            // or inside a shizuku directory there. Nothing runs it, and the starter finds the
+            // manager's APK from beside itself in the app's native library directory. The
+            // directory goes only when it is shell's and holds nothing but that copy.
             runCommand("[ -f /data/local/tmp/shizuku ] && rm -f /data/local/tmp/shizuku")
+            runCommand(
+                "d=/data/local/tmp/shizuku; " +
+                    "if [ -d \"\$d\" ] && [ ! -L \"\$d\" ] && [ \"\$(stat -c %u \"\$d\")\" = 2000 ] " +
+                    "&& [ \"\$(ls -A \"\$d\")\" = libshizuku.so ]; then rm -f \"\$d/libshizuku.so\" && rmdir \"\$d\"; fi",
+            )
 
             true
         }
