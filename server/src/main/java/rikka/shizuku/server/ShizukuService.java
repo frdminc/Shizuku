@@ -311,7 +311,8 @@ public class ShizukuService extends Service<ShizukuUserServiceManager, ShizukuCl
                 Thread.sleep(500);
             } catch (Throwable ignored) {
             }
-            System.exit(1);
+            // Null until the config manager is created, and then nothing can be waiting.
+            saveConfigAndExit(1);
         });
 
         HandlerUtil.setMainHandler(mainHandler);
@@ -351,7 +352,7 @@ public class ShizukuService extends Service<ShizukuUserServiceManager, ShizukuCl
         ApkChangedObservers.start(ai.sourceDir, () -> {
             if (getManagerApplicationInfo() == null) {
                 LOGGER.w("manager app is uninstalled in user 0, exiting...");
-                System.exit(ServerConstants.MANAGER_APP_NOT_FOUND);
+                saveConfigAndExit(ServerConstants.MANAGER_APP_NOT_FOUND);
             }
         });
 
@@ -625,7 +626,29 @@ public class ShizukuService extends Service<ShizukuUserServiceManager, ShizukuCl
     public void exit() {
         enforceManagerPermission("exit");
         LOGGER.i("exit");
-        System.exit(0);
+        saveConfigAndExit(0);
+    }
+
+    /**
+     * Writes a config change still waiting for the worker, then exits. The worker writes a change
+     * the operator made at once, but one made just before an exit can still be in its queue. A
+     * failed write is logged and the exit goes ahead.
+     */
+    private void saveConfigAndExit(int status) {
+        ShizukuConfigManager config = configManager;
+        if (config != null) {
+            try {
+                config.flushPendingWrite();
+            } catch (Throwable t) {
+                LOGGER.w(t, "cannot write the config before exiting");
+            }
+        }
+        exitProcess(status);
+    }
+
+    /** System.exit; a seam, so tests can follow an exit path without ending the test JVM. */
+    static void exitProcess(int status) {
+        System.exit(status);
     }
 
     @Override

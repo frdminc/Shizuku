@@ -28,7 +28,8 @@ import rikka.shizuku.server.util.Logger;
  * <li>A write puts the bytes in a temp file ({@code .tmp.<pid>}) created afresh in the same
  * directory (exclusive, no-follow), syncs it, and sets mode 0660 and group shell through its
  * descriptor. It then renames the temp file to the backup's name and the backup to the config's
- * name. A rename replaces a symbolic link at the name it renames to; it does not follow it.
+ * name, and syncs the directory so the renames are on disk. A rename replaces a symbolic link at
+ * the name it renames to; it does not follow it.
  * <li>A read opens the config without following a symbolic link and reads it only when fstat shows
  * a regular file of at most {@link #MAX_BYTES}. Anything else reads as no config and is left where
  * it is; the next write replaces it.
@@ -73,6 +74,9 @@ final class SafeConfigFile {
 
         /** The names in directory {@code dir}; empty when it cannot be listed. */
         String[] list(String dir);
+
+        /** Syncs directory {@code dir}, so the renames and removals in it are on disk. */
+        void syncDir(String dir) throws IOException;
     }
 
     /** What is at the config's name is not something to read as a config. */
@@ -164,6 +168,7 @@ final class SafeConfigFile {
             }
             removeQuietly(backup);
             removeQuietly(newName);
+            syncDirQuietly();
             return;
         }
         try {
@@ -174,6 +179,24 @@ final class SafeConfigFile {
         }
         // Left by AtomicFile on API 30 and later; never read while the config exists.
         removeQuietly(newName);
+        syncDirQuietly();
+    }
+
+    /**
+     * Syncs the directory once the renames are done. Until then a rename may not be on disk (on
+     * f2fs, until the next checkpoint), and a power loss can bring the previous config back. The
+     * new config is complete either way, so a failure (some filesystems refuse to sync a
+     * directory) is logged and the write still counts.
+     */
+    private void syncDirQuietly() {
+        if (dir == null) {
+            return;
+        }
+        try {
+            ops.syncDir(dir);
+        } catch (IOException | RuntimeException e) {
+            LOGGER.w(e, "cannot sync %s; the config is saved but may not survive a power loss", dir);
+        }
     }
 
     /**
@@ -337,6 +360,29 @@ final class SafeConfigFile {
             // readdir of the directory itself; no entry is opened or followed.
             String[] names = new File(dir).list();
             return names != null ? names : new String[0];
+        }
+
+        @Override
+        public void syncDir(String dir) throws IOException {
+            FileDescriptor fd;
+            try {
+                // OsConstants has no public O_DIRECTORY; the fstat below checks the kind instead.
+                // O_NONBLOCK: a FIFO at the name would otherwise wait for a writer.
+                fd = Os.open(dir, OsConstants.O_RDONLY | OsConstants.O_NOFOLLOW | OsConstants.O_NONBLOCK
+                        | cloexec(), 0);
+            } catch (ErrnoException e) {
+                throw io(e);
+            }
+            try {
+                if (!OsConstants.S_ISDIR(Os.fstat(fd).st_mode)) {
+                    throw new IOException(dir + " is not a directory");
+                }
+                Os.fsync(fd);
+            } catch (ErrnoException e) {
+                throw io(e);
+            } finally {
+                closeQuietly(fd);
+            }
         }
 
         private void closeQuietly(FileDescriptor fd) {

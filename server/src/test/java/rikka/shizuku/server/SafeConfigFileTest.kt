@@ -284,6 +284,70 @@ class SafeConfigFileTest {
         }
     }
 
+    // --- directory sync --------------------------------------------------------------------------
+
+    // A rename is on disk only once its directory is: on f2fs one that was not synced waits for the
+    // next checkpoint, and a power loss before it brings the previous config back.
+
+    @Test
+    fun `a write syncs the directory after its last rename`() {
+        put(base, "{\"v\":24}")
+        val ops = FaultyOps(NioOps())
+
+        file(ops).write("{\"v\":25}".toByteArray())
+
+        assertSyncedAfterLastRename(ops)
+    }
+
+    @Test
+    fun `a write that renames straight to the config name syncs the directory after it`() {
+        put(base, "{\"v\":26}")
+        val ops = FaultyOps(NioOps()).apply { failRenameTo = backup.toString() }
+
+        file(ops).write("{\"v\":27}".toByteArray())
+
+        assertSyncedAfterLastRename(ops)
+    }
+
+    @Test
+    fun `a write whose new config stays at the backup name syncs the directory after it`() {
+        put(base, "{\"v\":28}")
+        val ops = FaultyOps(NioOps()).apply { failRenameFrom = backup.toString() }
+
+        file(ops).write("{\"v\":29}".toByteArray())
+
+        assertSyncedAfterLastRename(ops)
+    }
+
+    @Test
+    fun `a directory sync that fails still counts as saved`() {
+        put(base, "{\"v\":30}")
+        val ops = FaultyOps(NioOps()).apply { failSyncDir = true }
+
+        file(ops).write("{\"v\":31}".toByteArray())
+
+        assertTrue(ops.log.contains("syncDir $dir"), "the directory sync was not tried: ${ops.log}")
+        assertEquals("{\"v\":31}", text(base))
+        assertContentEquals("{\"v\":31}".toByteArray(), file().read())
+    }
+
+    @Test
+    fun `a write that fails does not sync the directory`() {
+        put(base, "{\"v\":32}")
+        val ops = FaultyOps(NioOps()).apply { failCreate = true }
+
+        assertFailsWith<IOException> { file(ops).write("{\"v\":33}".toByteArray()) }
+
+        assertFalse(ops.log.any { it.startsWith("syncDir") }, "synced after a failed write: ${ops.log}")
+    }
+
+    private fun assertSyncedAfterLastRename(ops: FaultyOps) {
+        val lastRename = ops.log.indexOfLast { it.startsWith("rename") }
+        val sync = ops.log.lastIndexOf("syncDir $dir")
+        assertTrue(lastRename >= 0, "no rename: ${ops.log}")
+        assertTrue(sync > lastRename, "the directory was not synced after the last rename: ${ops.log}")
+    }
+
     // --- read ----------------------------------------------------------------------------------
 
     @Test
@@ -399,7 +463,10 @@ class SafeConfigFileTest {
         var failCreate = false
         var failRenameFrom: String? = null
         var failRenameTo: String? = null
+        var failSyncDir = false
         var stopAtStep = 0
+        /** Every operation that changes or syncs the directory, in order. */
+        val log = mutableListOf<String>()
         /** The temp file was renamed to one of the config's names. */
         var installed = false
         var lastOp = ""
@@ -407,6 +474,7 @@ class SafeConfigFileTest {
 
         private fun step(op: String) {
             lastOp = op
+            log.add(op)
             if (++steps == stopAtStep) throw Stopped()
         }
 
@@ -426,6 +494,12 @@ class SafeConfigFileTest {
         override fun remove(path: String): Boolean {
             step("remove $path")
             return ops.remove(path)
+        }
+
+        override fun syncDir(dir: String) {
+            step("syncDir $dir")
+            if (failSyncDir) throw IOException("cannot sync $dir")
+            ops.syncDir(dir)
         }
     }
 
@@ -480,5 +554,9 @@ class SafeConfigFileTest {
         }
 
         override fun list(dir: String): Array<String> = Path.of(dir).toFile().list() ?: emptyArray()
+
+        override fun syncDir(dir: String) {
+            FileChannel.open(Path.of(dir), StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS).use { it.force(true) }
+        }
     }
 }

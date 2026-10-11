@@ -11,6 +11,7 @@ All notable changes to ShizukuPlus are documented here. See [AI_ATTRIBUTIONS.md]
 ### 🐛 Bug Fixes
 - **A restart no longer leaves two server processes running** — restarting the server from outside the app (a shell, or automation that runs the starter) while the watchdog was on could start a second server alongside the new one, and the two then wrote the same settings file. A server now exits at start-up if another is already running, and the watchdog waits a few seconds after the server stops and restarts it only if no server has come back on its own.
 - **The server's config file is now written and read without following symbolic links** — the server writes `shizuku.json` to a new file in the same directory, sets its mode and group on that file, and renames it into place; a read opens it without following a symbolic link and reads only a regular file. A config, or the backup copy, that an earlier version wrote is read as before.
+- **A permission change made just before stopping or restarting the server is no longer lost** — the server saved a grant, revoke or permission flag change up to 10 seconds after it was made, so stopping the server or restarting it within that time dropped the change (a revoked app got its access back). Such a change is now saved at once, Stop saves any change still waiting before the server exits, and the directory holding the config is synced after each save so the new file survives a power loss.
 
 ---
 

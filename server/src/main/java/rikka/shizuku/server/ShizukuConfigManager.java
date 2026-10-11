@@ -7,6 +7,7 @@ import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.content.pm.Signature;
 import android.os.Build;
+import android.os.Handler;
 import android.os.SystemClock;
 
 import androidx.annotation.Nullable;
@@ -45,7 +46,19 @@ public class ShizukuConfigManager extends ConfigManager {
             .setVersion(ShizukuConfig.LATEST_VERSION)
             .create();
 
+    /**
+     * How long a batched write waits, so the start-up reconcile and import, which can change many
+     * entries at once, are written together. A change the operator makes is written at once
+     * instead ({@link #scheduleWriteLocked(boolean)}).
+     */
     private static final long WRITE_DELAY = 10 * 1000;
+
+    /** No write is waiting. */
+    private static final int WRITE_NONE = 0;
+    /** A write is posted to run after {@link #WRITE_DELAY}. */
+    private static final int WRITE_DELAYED = 1;
+    /** A write is posted to run next on the worker. */
+    private static final int WRITE_PROMPT = 2;
 
     private static final File FILE = getConfigFile();
     private static final SafeConfigFile CONFIG_FILE = new SafeConfigFile(FILE);
@@ -87,20 +100,53 @@ public class ShizukuConfigManager extends ConfigManager {
         return new ShizukuConfig();
     }
 
-    public static void write(ShizukuConfig config) {
+    /** Writes {@code json} as the config. Callers hold the CONFIG_FILE lock; a seam for tests. */
+    static void writeJson(String json) {
+        // The config is written to a fresh file given mode 0660 and group shell through its
+        // descriptor, then renamed into place, never through a symbolic link (SafeConfigFile).
+        // Closing #419: the config file was previously world-readable/writable. Root bypasses
+        // DAC checks entirely, so it doesn't need explicit bits; only shell needs access,
+        // granted via group ownership.
+        try {
+            CONFIG_FILE.write(json.getBytes());
+            LOGGER.v("config saved to " + CONFIG_FILE.getPath());
+        } catch (Throwable tr) {
+            LOGGER.e(tr, "can't save %s; the previous config is kept.", CONFIG_FILE.getPath());
+        }
+    }
+
+    /**
+     * Writes a change still waiting for the worker now, on the calling thread; nothing when none
+     * is. For an exit, which would otherwise lose it.
+     */
+    void flushPendingWrite() {
+        writePending();
+    }
+
+    /**
+     * Writes the config if a change is waiting. The config is copied out under this object's lock,
+     * which every change holds, and written under CONFIG_FILE's, held across both so that two
+     * writes (the worker's and an exit's flush) cannot reach the disk in the other order. Nothing
+     * takes CONFIG_FILE while holding this object's lock.
+     */
+    private void writePending() {
         synchronized (CONFIG_FILE) {
-            // The config is written to a fresh file given mode 0660 and group shell through its
-            // descriptor, then renamed into place, never through a symbolic link (SafeConfigFile).
-            // Closing #419: the config file was previously world-readable/writable. Root bypasses
-            // DAC checks entirely, so it doesn't need explicit bits; only shell needs access,
-            // granted via group ownership.
-            try {
-                String json = GSON_OUT.toJson(config);
-                CONFIG_FILE.write(json.getBytes());
-                LOGGER.v("config saved to " + CONFIG_FILE.getPath());
-            } catch (Throwable tr) {
-                LOGGER.e(tr, "can't save %s; the previous config is kept.", CONFIG_FILE.getPath());
+            String json;
+            synchronized (this) {
+                HandlerKt.getWorkerHandler().removeCallbacks(mWriteRunner);
+                if (pendingWrite == WRITE_NONE) {
+                    return;
+                }
+                // Cleared before the copy: a change after it posts a write of its own.
+                pendingWrite = WRITE_NONE;
+                try {
+                    json = GSON_OUT.toJson(config);
+                } catch (Throwable tr) {
+                    LOGGER.e(tr, "can't save %s; the previous config is kept.", CONFIG_FILE.getPath());
+                    return;
+                }
             }
+            writeJson(json);
         }
     }
 
@@ -108,11 +154,14 @@ public class ShizukuConfigManager extends ConfigManager {
 
         @Override
         public void run() {
-            write(config);
+            writePending();
         }
     };
 
     private final ShizukuConfig config;
+
+    /** WRITE_NONE, WRITE_DELAYED or WRITE_PROMPT: the write posted to the worker, if any. */
+    private int pendingWrite = WRITE_NONE;
 
     /**
      * Uids whose stored grant start-up could not check against their packages and signers (a
@@ -230,26 +279,39 @@ public class ShizukuConfigManager extends ConfigManager {
                 if (allowed) {
                     List<String> packages = new ArrayList<>();
                     packages.add(pi.packageName);
-                    updateLocked(uid, packages, ConfigManager.MASK_PERMISSION, ConfigManager.FLAG_ALLOWED,
-                            currentSigners(uid, packages));
-                    changed = true;
+                    if (updateLocked(uid, packages, ConfigManager.MASK_PERMISSION, ConfigManager.FLAG_ALLOWED,
+                            currentSigners(uid, packages))) {
+                        changed = true;
+                    }
                 }
         }
 
         if (changed) {
-            scheduleWriteLocked();
+            // Start-up: one write for the whole reconcile and import.
+            scheduleWriteLocked(false);
         }
     }
 
-    private void scheduleWriteLocked() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            if (HandlerKt.getWorkerHandler().hasCallbacks(mWriteRunner)) {
-                return;
-            }
-        } else {
-            HandlerKt.getWorkerHandler().removeCallbacks(mWriteRunner);
+    /**
+     * Posts a write of the config to the worker: at once when {@code prompt} (a change the operator
+     * made, which a stop or restart soon after must not lose), otherwise after {@link #WRITE_DELAY}
+     * (start-up's bulk changes, and fill-ins that are worked out again at the next start). A
+     * prompt write brings a delayed one forward; either one already posted covers a delayed
+     * request. Each write saves the whole config, so one write covers every change before it.
+     */
+    private void scheduleWriteLocked(boolean prompt) {
+        if (pendingWrite == WRITE_PROMPT || (pendingWrite == WRITE_DELAYED && !prompt)) {
+            return;
         }
-        HandlerKt.getWorkerHandler().postDelayed(mWriteRunner, WRITE_DELAY);
+        Handler handler = HandlerKt.getWorkerHandler();
+        if (prompt) {
+            handler.removeCallbacks(mWriteRunner);
+            handler.post(mWriteRunner);
+            pendingWrite = WRITE_PROMPT;
+        } else {
+            handler.postDelayed(mWriteRunner, WRITE_DELAY);
+            pendingWrite = WRITE_DELAYED;
+        }
     }
 
     private ShizukuConfig.PackageEntry findLocked(int uid) {
@@ -324,7 +386,8 @@ public class ShizukuConfigManager extends ConfigManager {
                 unconfirmedUids.remove(uid);
                 lastRecheck.remove(uid);
                 if (result == Check.UPDATED) {
-                    scheduleWriteLocked();
+                    // Package names or signers filled in; the next start works them out again.
+                    scheduleWriteLocked(false);
                 }
                 return entry;
             }
@@ -764,11 +827,8 @@ public class ShizukuConfigManager extends ConfigManager {
         }
     }
 
-    private void updateLocked(int uid, List<String> packages, int mask, int values) {
-        updateLocked(uid, packages, mask, values, null);
-    }
-
-    private void updateLocked(int uid, List<String> packages, int mask, int values, @Nullable List<String> signers) {
+    /** Applies the change; true when the config changed. The caller schedules the write. */
+    private boolean updateLocked(int uid, List<String> packages, int mask, int values, @Nullable List<String> signers) {
         ShizukuConfig.PackageEntry entry = findLocked(uid);
         if (entry == null) {
             entry = new ShizukuConfig.PackageEntry(uid, mask & values);
@@ -776,7 +836,7 @@ public class ShizukuConfigManager extends ConfigManager {
         } else {
             int newValue = (entry.flags & ~mask) | (mask & values);
             if (newValue == entry.flags) {
-                return;
+                return false;
             }
             entry.flags = newValue;
         }
@@ -791,7 +851,7 @@ public class ShizukuConfigManager extends ConfigManager {
         if (signers != null && !signers.isEmpty()) {
             entry.signers = signers;
         }
-        scheduleWriteLocked();
+        return true;
     }
 
     public void update(int uid, List<String> packages, int mask, int values) {
@@ -817,7 +877,7 @@ public class ShizukuConfigManager extends ConfigManager {
                         ? packages : PackageManagerApis.getPackagesForUidNoThrow(uid))
                 : null;
         synchronized (this) {
-            updateLocked(uid, packages, mask, values, signers);
+            boolean changed = updateLocked(uid, packages, mask, values, signers);
             if ((mask & ConfigManager.MASK_PERMISSION) != 0) {
                 // The operator just decided for this uid, which settles a grant left unconfirmed at
                 // start-up; and a grant answers for the signers it was made with, even when the
@@ -827,8 +887,12 @@ public class ShizukuConfigManager extends ConfigManager {
                 ShizukuConfig.PackageEntry entry = findLocked(uid);
                 if (entry != null && signers != null && !signers.isEmpty() && !signers.equals(entry.signers)) {
                     entry.signers = signers;
-                    scheduleWriteLocked();
+                    changed = true;
                 }
+            }
+            if (changed) {
+                // The operator's change: written at once, on the worker.
+                scheduleWriteLocked(true);
             }
         }
     }
@@ -841,7 +905,8 @@ public class ShizukuConfigManager extends ConfigManager {
         config.packages.remove(entry);
         unconfirmedUids.remove(uid);
         lastRecheck.remove(uid);
-        scheduleWriteLocked();
+        // A removal ends a grant, so it is written at once whoever asked for it.
+        scheduleWriteLocked(true);
     }
 
     public void remove(int uid) {
