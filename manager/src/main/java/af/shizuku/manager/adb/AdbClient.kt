@@ -46,10 +46,12 @@ class AdbClient(
     private var aborted = false
 
     /** Deadline/cancellation closes the raw socket, including an in-progress TLS handshake. */
-    internal fun abort() = synchronized(socketLock) {
-        aborted = true
-        runCatching { socket?.close() }
-    }
+    internal fun abort() =
+        synchronized(socketLock) {
+            aborted = true
+            runCatching { socket?.close() }
+        }
+
     @Volatile
     private var socket: Socket? = null
     private var plainInputStream: DataInputStream? = null

@@ -206,30 +206,66 @@ class FakeAdbd(
 
     /** Each accepted connection gets a fresh self-signed certificate, like adbd. */
     private fun newTlsContext(): javax.net.ssl.SSLContext {
-        val pair = java.security.KeyPairGenerator.getInstance("RSA").apply { initialize(2048) }.generateKeyPair()
-        val name = org.bouncycastle.asn1.x500.X500Name("CN=fake-adbd")
+        val pair =
+            java.security.KeyPairGenerator
+                .getInstance("RSA")
+                .apply { initialize(2048) }
+                .generateKeyPair()
+        val name =
+            org.bouncycastle.asn1.x500
+                .X500Name("CN=fake-adbd")
         val now = System.currentTimeMillis()
-        val builder = org.bouncycastle.cert.jcajce.JcaX509v3CertificateBuilder(
-            name, java.math.BigInteger(128, java.security.SecureRandom()),
-            java.util.Date(now - 60_000), java.util.Date(now + 3_600_000), name, pair.public,
-        )
-        val encoded = builder.build(org.bouncycastle.operator.jcajce.JcaContentSignerBuilder("SHA256withRSA").build(pair.private)).encoded
-        val cert = java.security.cert.CertificateFactory.getInstance("X.509")
-            .generateCertificate(encoded.inputStream()) as java.security.cert.X509Certificate
+        val builder =
+            org.bouncycastle.cert.jcajce.JcaX509v3CertificateBuilder(
+                name,
+                java.math.BigInteger(128, java.security.SecureRandom()),
+                java.util.Date(now - 60_000),
+                java.util.Date(now + 3_600_000),
+                name,
+                pair.public,
+            )
+        val encoded =
+            builder
+                .build(
+                    org.bouncycastle.operator.jcajce
+                        .JcaContentSignerBuilder("SHA256withRSA")
+                        .build(pair.private),
+                ).encoded
+        val cert =
+            java.security.cert.CertificateFactory
+                .getInstance("X.509")
+                .generateCertificate(encoded.inputStream()) as java.security.cert.X509Certificate
         certificates += cert
-        val store = java.security.KeyStore.getInstance("PKCS12").apply {
-            load(null, null)
-            setKeyEntry("server", pair.private, charArrayOf(), arrayOf(cert))
-        }
-        val keys = javax.net.ssl.KeyManagerFactory.getInstance(javax.net.ssl.KeyManagerFactory.getDefaultAlgorithm()).apply {
-            init(store, charArrayOf())
-        }
-        val trust = object : javax.net.ssl.X509TrustManager {
-            override fun getAcceptedIssuers(): Array<java.security.cert.X509Certificate> = emptyArray()
-            override fun checkClientTrusted(chain: Array<out java.security.cert.X509Certificate>, authType: String) { }
-            override fun checkServerTrusted(chain: Array<out java.security.cert.X509Certificate>, authType: String) { }
-        }
-        return javax.net.ssl.SSLContext.getInstance("TLSv1.3").apply { init(keys.keyManagers, arrayOf(trust), null) }
+        val store =
+            java.security.KeyStore.getInstance("PKCS12").apply {
+                load(null, null)
+                setKeyEntry("server", pair.private, charArrayOf(), arrayOf(cert))
+            }
+        val keys =
+            javax.net.ssl.KeyManagerFactory
+                .getInstance(
+                    javax.net.ssl.KeyManagerFactory
+                        .getDefaultAlgorithm(),
+                ).apply {
+                    init(store, charArrayOf())
+                }
+        val trust =
+            object : javax.net.ssl.X509TrustManager {
+                override fun getAcceptedIssuers(): Array<java.security.cert.X509Certificate> = emptyArray()
+
+                override fun checkClientTrusted(
+                    chain: Array<out java.security.cert.X509Certificate>,
+                    authType: String,
+                ) { }
+
+                override fun checkServerTrusted(
+                    chain: Array<out java.security.cert.X509Certificate>,
+                    authType: String,
+                ) { }
+            }
+        return javax.net.ssl.SSLContext
+            .getInstance("TLSv1.3")
+            .apply { init(keys.keyManagers, arrayOf(trust), null) }
     }
 
     // Polls rather than blocking on the queue so that a connection the client has already closed

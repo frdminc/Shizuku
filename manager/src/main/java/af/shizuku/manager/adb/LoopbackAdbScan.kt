@@ -13,6 +13,7 @@ internal object LoopbackAdbScan {
     private const val CONCURRENCY = 32
     private const val CONNECT_MS = 200
     private const val ATTEMPT_MS = 1500L
+
     // Known non-ADB services. Never skip arbitrary open ports merely because they are registered.
     private val excluded = setOf(5037, 5353, 5555, 1717)
 
@@ -39,6 +40,7 @@ internal object LoopbackAdbScan {
         val workers = Executors.newFixedThreadPool(CONCURRENCY) { r -> Thread(r, "adb-port-scan").apply { isDaemon = true } }
         val timer = ScheduledThreadPoolExecutor(1) { r -> Thread(r, "adb-scan-deadline").apply { isDaemon = true } }
         timer.removeOnCancelPolicy = true
+
         fun stop() {
             synchronized(lock) {
                 if (stopped) return
@@ -54,7 +56,11 @@ internal object LoopbackAdbScan {
             try {
                 val range = portRange ?: parseRange(runCatching { File("/proc/sys/net/ipv4/ip_local_port_range").readText() }.getOrNull())
                 val next = AtomicInteger(range.first)
-                val prefs = ShizukuSettings.getPreferences() ?: run { stop(); return@execute }
+                val prefs =
+                    ShizukuSettings.getPreferences() ?: run {
+                        stop()
+                        return@execute
+                    }
                 val key = AdbKey(PreferenceAdbKeyStore(prefs), "shizuku+")
                 // Initialize the lazy TLS context once, before concurrent socket work.
                 key.sslContext
@@ -74,14 +80,15 @@ internal object LoopbackAdbScan {
                             var expired = false
                             var deadline: java.util.concurrent.ScheduledFuture<*>? = null
                             try {
-                                deadline = timer.schedule({
-                                    synchronized(lock) {
-                                        if (!handedOff) {
-                                            expired = true
-                                            client.abort()
+                                deadline =
+                                    timer.schedule({
+                                        synchronized(lock) {
+                                            if (!handedOff) {
+                                                expired = true
+                                                client.abort()
+                                            }
                                         }
-                                    }
-                                }, attemptMs, TimeUnit.MILLISECONDS)
+                                    }, attemptMs, TimeUnit.MILLISECONDS)
                                 client.connect()
                                 beforeHandoff()
                                 synchronized(lock) {

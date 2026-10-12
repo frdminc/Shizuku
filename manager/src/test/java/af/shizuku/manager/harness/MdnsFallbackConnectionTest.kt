@@ -32,7 +32,12 @@ class MdnsFallbackConnectionTest {
         if (android.os.Build.VERSION.SDK_INT < 30) return
         world = FakeWorld(RuntimeEnvironment.getApplication()).also { it.install() }
         // These short budgets measure socket deadlines, not first-use JVM crypto loading.
-        af.shizuku.manager.adb.AdbKey(af.shizuku.manager.adb.PreferenceAdbKeyStore(world.prefs), "test").sslContext
+        af.shizuku.manager.adb
+            .AdbKey(
+                af.shizuku.manager.adb
+                    .PreferenceAdbKeyStore(world.prefs),
+                "test",
+            ).sslContext
     }
 
     @After fun cleanup() {
@@ -42,11 +47,15 @@ class MdnsFallbackConnectionTest {
         if (::world.isInitialized) world.close()
     }
 
-    private fun scanThreads() = Thread.getAllStackTraces().keys.filter {
-        it.isAlive && it.name in setOf("adb-port-scan", "adb-scan-deadline")
-    }
+    private fun scanThreads() =
+        Thread.getAllStackTraces().keys.filter {
+            it.isAlive && it.name in setOf("adb-port-scan", "adb-scan-deadline")
+        }
 
-    private fun await(timeoutMs: Long = 5_000, predicate: () -> Boolean) {
+    private fun await(
+        timeoutMs: Long = 5_000,
+        predicate: () -> Boolean,
+    ) {
         val end = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs)
         while (!predicate() && System.nanoTime() < end) Thread.sleep(10)
         assertTrue("condition did not complete within ${timeoutMs}ms", predicate())
@@ -147,11 +156,18 @@ class MdnsFallbackConnectionTest {
         FakeAdbd(tls = true).use { server ->
             val reached = AtomicBoolean()
             val results = LinkedBlockingQueue<WirelessDebugging.ScanResult>()
-            stops += LoopbackAdbScan.start(world.app, { results.add(it) }, server.port..server.port,
-                attemptMs = 1_500, budgetMs = 4_000, beforeHandoff = {
-                    reached.set(true)
-                    Thread.sleep(1_700)
-                })
+            stops +=
+                LoopbackAdbScan.start(
+                    world.app,
+                    { results.add(it) },
+                    server.port..server.port,
+                    attemptMs = 1_500,
+                    budgetMs = 4_000,
+                    beforeHandoff = {
+                        reached.set(true)
+                        Thread.sleep(1_700)
+                    },
+                )
             await { reached.get() }
             await { scanThreads().isEmpty() }
             results.forEach { it.client?.close() }
@@ -160,7 +176,9 @@ class MdnsFallbackConnectionTest {
         }
     }
 
-    @Test @Config(sdk = [29]) fun `Android 10 does not start real scan`() {
+    @Test
+    @Config(sdk = [29])
+    fun `Android 10 does not start real scan`() {
         WirelessDebugging.resetForTesting()
         val stop = WirelessDebugging.discovery.scan(RuntimeEnvironment.getApplication()) { fail("unexpected result") }
         stop?.invoke()
@@ -171,19 +189,25 @@ class MdnsFallbackConnectionTest {
         ActivityLogManager.initialize(world.app, ActivityLogSettingsImpl())
         val provider = Robolectric.buildContentProvider(ShizukuManagerProvider::class.java).create().get()
         var touched = false
-        val supplied = object : Binder() {
-            override fun pingBinder(): Boolean {
-                touched = true
-                return true
+        val supplied =
+            object : Binder() {
+                override fun pingBinder(): Boolean {
+                    touched = true
+                    return true
+                }
             }
-        }
         ShadowBinder.setCallingUid(10_123)
         val before = ActivityLogManager.logs.value.size
         assertNull(provider.call("sendBinder", null, Bundle().apply { putBinder("binder", supplied) }))
         assertNull(rikka.shizuku.Shizuku.getBinder())
         assertFalse("unaccepted binder must never be queried", touched)
         assertEquals(before + 1, ActivityLogManager.logs.value.size)
-        assertTrue(ActivityLogManager.logs.value.last().action.contains("10123"))
+        assertTrue(
+            ActivityLogManager.logs.value
+                .last()
+                .action
+                .contains("10123"),
+        )
     }
 
     @Test fun `binder delivery preserves shell, system and root handoff`() {

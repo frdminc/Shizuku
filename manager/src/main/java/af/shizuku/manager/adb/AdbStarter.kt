@@ -133,11 +133,13 @@ object AdbStarter {
 
                 var activePort = port
                 var retained = connectedClient
+
                 fun nextClient(): AdbClient {
                     val connected = retained
                     retained = null
                     return connected ?: AdbClient("127.0.0.1", activePort, key, onPending)
                 }
+
                 suspend fun connectUnlessRetained(client: AdbClient) {
                     if (client !== connectedClient) connectWithRetry(client, activePort)
                 }

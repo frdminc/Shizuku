@@ -159,16 +159,30 @@ object WirelessDebugging {
         ): () -> Unit
 
         /** Fake discoveries opt in explicitly: existing scenarios must never scan real ports. */
-        fun scan(context: Context, onResult: (ScanResult) -> Unit): (() -> Unit)? = null
+        fun scan(
+            context: Context,
+            onResult: (ScanResult) -> Unit,
+        ): (() -> Unit)? = null
     }
 
-    data class ScanResult(val port: Int, val client: AdbClient?)
+    data class ScanResult(
+        val port: Int,
+        val client: AdbClient?,
+    )
 
-    private fun realDiscovery() = object : PortDiscovery {
-        override fun start(context: Context, onPort: (Int) -> Unit) = startMdns(context, onPort)
-        override fun scan(context: Context, onResult: (ScanResult) -> Unit) =
-            if (available()) LoopbackAdbScan.start(context, onResult) else null
-    }
+    private fun realDiscovery() =
+        object : PortDiscovery {
+            override fun start(
+                context: Context,
+                onPort: (Int) -> Unit,
+            ) = startMdns(context, onPort)
+
+            override fun scan(
+                context: Context,
+                onResult: (ScanResult) -> Unit,
+            ) =
+                if (available()) LoopbackAdbScan.start(context, onResult) else null
+        }
 
     @Volatile
     internal var scanBudgetMs = 12_000L
@@ -990,6 +1004,7 @@ object WirelessDebugging {
             scannedClient?.close()
             scannedClient = null
         }
+
         // adb_wifi_enabled before this start (or a run of it that died) first touched it.
         private var initial: Int? = null
 
@@ -1196,11 +1211,12 @@ object WirelessDebugging {
             var scanned = false
             var scanStarted = false
             var stopScan: () -> Unit = {}
-            val stop = discovery.start(context) { p ->
-                synchronized(winnerLock) {
-                    if (accepting && p in 1..65535) found.compareAndSet(0, p)
+            val stop =
+                discovery.start(context) { p ->
+                    synchronized(winnerLock) {
+                        if (accepting && p in 1..65535) found.compareAndSet(0, p)
+                    }
                 }
-            }
             try {
                 var deadline = elapsedMs() + discoveryMs
                 while (true) {
@@ -1209,7 +1225,8 @@ object WirelessDebugging {
                         setWritePending(context, false)
                         val path = if (scanned) "scan" else "mDNS"
                         note("$path found port $port")
-                        af.shizuku.manager.utils.ManagerActivityLog.log(context, "Wireless ADB $path found port $port")
+                        af.shizuku.manager.utils.ManagerActivityLog
+                            .log(context, "Wireless ADB $path found port $port")
                         return Round.Found(port)
                     }
                     if (setting(context) == 0) {
@@ -1273,18 +1290,19 @@ object WirelessDebugging {
                             if (!scanStarted && remaining() > 0) {
                                 scanStarted = true
                                 deadline = minOf(elapsedMs() + scanBudgetMs, sessionDeadline())
-                                val scanStop = discovery.scan(context) { result ->
-                                    synchronized(winnerLock) {
-                                        if (accepting && result.port in 1..65535 && found.get() == 0) {
-                                            scannedClient = result.client
-                                            scanned = true
-                                            found.set(result.port)
-                                        } else {
-                                            result.client?.abort()
-                                            result.client?.close()
+                                val scanStop =
+                                    discovery.scan(context) { result ->
+                                        synchronized(winnerLock) {
+                                            if (accepting && result.port in 1..65535 && found.get() == 0) {
+                                                scannedClient = result.client
+                                                scanned = true
+                                                found.set(result.port)
+                                            } else {
+                                                result.client?.abort()
+                                                result.client?.close()
+                                            }
                                         }
                                     }
-                                }
                                 if (scanStop != null) {
                                     stopScan = scanStop
                                     continue
