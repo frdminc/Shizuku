@@ -9,6 +9,13 @@ import rikka.shizuku.Shizuku
 import timber.log.Timber
 
 object DeviceOptimizer {
+    /**
+     * Tests only: run after this app is added to the Doze whitelist, so a scenario can simulate
+     * the whitelist command's effect (the app becoming exempt from battery optimization).
+     */
+    @androidx.annotation.VisibleForTesting
+    var onAppWhitelistedForTesting: ((String) -> Unit)? = null
+
     private fun runCommand(cmd: String): Boolean {
         if (Shizuku.pingBinder()) {
             try {
@@ -45,6 +52,7 @@ object DeviceOptimizer {
 
             // 1. Whitelist Shizuku from Doze / Battery Optimization
             runCommand("dumpsys deviceidle whitelist +$pkgName")
+            onAppWhitelistedForTesting?.invoke(pkgName)
 
             // 2. Whitelist known terminal and companion packages if installed
             val clientPackages =

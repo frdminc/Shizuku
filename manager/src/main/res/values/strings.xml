@@ -932,6 +932,9 @@
     <string name="watchdog_shizuku_crashed_title">Shizuku crashed recently</string>
     <string name="watchdog_shizuku_crashed_text">Watchdog restarted the service. Tap to learn about potential fixes to prevent future crashes.</string>
     <string name="watchdog_shizuku_crashed_action_turn_off_alerts">Turn Off Alerts</string>
+    <string name="battery_exemption_channel_name">Battery optimization</string>
+    <string name="battery_exemption_notification_title">Allow Shizuku+ to run in the background</string>
+    <string name="battery_exemption_notification_text">The Watchdog was turned on automatically. Exempt Shizuku+ from battery optimization so it can restart the service when it stops.</string>
 
     <!-- Misc -->
     <string name="dialog_cannot_open_browser_title">Can\'t start browser</string>

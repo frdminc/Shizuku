@@ -35,6 +35,7 @@ public class ShizukuSettings {
         public static final String KEY_SYNCED_START_ON_BOOT_DEFAULT = "synced_start_on_boot_default";
         public static final String KEY_WATCHDOG = "watchdog";
         public static final String KEY_WATCHDOG_DEFAULT = "watchdog_default";
+        public static final String KEY_WATCHDOG_EXEMPTION_PENDING = "watchdog_exemption_pending";
         public static final String KEY_TCP_MODE = "tcp_mode";
         public static final String KEY_TCP_PORT = "tcp_port";
         public static final String KEY_LAST_PORT = "last_adb_port";
@@ -659,10 +660,32 @@ public class ShizukuSettings {
         if (prefs == null || !WATCHDOG_DEFAULT_PENDING.equals(prefs.getString(Keys.KEY_WATCHDOG_DEFAULT, null))) {
             return false;
         }
-        prefs.edit().putString(Keys.KEY_WATCHDOG_DEFAULT, WATCHDOG_DEFAULT_SETTLED).apply();
-        if (prefs.contains(Keys.KEY_WATCHDOG)) return false;
+        if (prefs.contains(Keys.KEY_WATCHDOG)) {
+            // A stored choice (the user's switch, a fleet profile, a restored backup) is kept.
+            prefs.edit().putString(Keys.KEY_WATCHDOG_DEFAULT, WATCHDOG_DEFAULT_SETTLED).apply();
+            return false;
+        }
+        // Settle the default and mark the exemption check pending in one write, so a process death
+        // between the two can't leave the Watchdog on with no flag. The check runs later, in the
+        // post-RUNNING coroutine; if the process dies first, the next RUNNING runs it once.
+        prefs.edit()
+            .putString(Keys.KEY_WATCHDOG_DEFAULT, WATCHDOG_DEFAULT_SETTLED)
+            .putBoolean(Keys.KEY_WATCHDOG_EXEMPTION_PENDING, true)
+            .apply();
         setWatchdog(context, true);
         return true;
+    }
+
+    /** A new install's Watchdog default turned on but its battery-exemption check has not run yet. */
+    public static boolean isWatchdogExemptionPending() {
+        SharedPreferences p = getPreferences();
+        return p != null && p.getBoolean(Keys.KEY_WATCHDOG_EXEMPTION_PENDING, false);
+    }
+
+    /** The exemption check ran (regardless of outcome); nothing more to retry. */
+    public static void clearWatchdogExemptionPending() {
+        SharedPreferences p = getPreferences();
+        if (p != null) p.edit().remove(Keys.KEY_WATCHDOG_EXEMPTION_PENDING).apply();
     }
 
     /**

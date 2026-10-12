@@ -18,7 +18,17 @@ object SettingsHelper {
         }
     }
 
+    /**
+     * Tests only: forces [isIgnoringBatteryOptimizations] to this value, so a scenario controls the
+     * exemption deterministically instead of through PowerManager's shadow (whose static map is
+     * shared across tests). Null defers to the real check.
+     */
+    @Volatile
+    @androidx.annotation.VisibleForTesting
+    var isIgnoringBatteryOptimizationsForTesting: Boolean? = null
+
     fun isIgnoringBatteryOptimizations(context: Context): Boolean {
+        isIgnoringBatteryOptimizationsForTesting?.let { return it }
         val pm = context.getSystemService(Context.POWER_SERVICE) as PowerManager
         return pm.isIgnoringBatteryOptimizations(context.packageName)
     }
@@ -122,6 +132,18 @@ object SettingsHelper {
             context.startActivity(intent)
         }
     }
+
+    /**
+     * The battery-exemption request the notification's tap opens: the AOSP "ignore battery
+     * optimizations" dialog for this package, which grants exactly what the guard checks
+     * (PowerManager.isIgnoringBatteryOptimizations), on every device including Samsung. Carries
+     * FLAG_ACTIVITY_NEW_TASK so it works as a notification content intent, not just from an Activity.
+     */
+    fun batteryExemptionIntent(context: Context): Intent =
+        Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+            setData(Uri.parse("package:" + context.packageName))
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
 
     fun isSamsungAutoBlockerDisabled(context: Context): Boolean =
         try {

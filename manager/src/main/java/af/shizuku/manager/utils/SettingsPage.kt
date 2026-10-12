@@ -153,18 +153,20 @@ sealed class SettingsPage(
         }
 
         object DeviceCareBattery : SettingsPage("com.samsung.android.sm.ACTION_BATTERY") {
+            /** The current One UI path, tried first; [launch] falls back from it, not to it. */
+            fun currentComponentIntent(context: Context): Intent =
+                Intent("com.samsung.android.sm.ACTION_BATTERY").apply {
+                    setComponent(ComponentName("com.samsung.android.lool", "com.samsung.android.sm.battery.ui.BatteryActivity"))
+                    flags = defaultFlags
+                }
+
             override fun launch(context: Context) {
                 runCatching {
                     // Samsung moved this component's package from .sm.ui.battery.* to
                     // .sm.battery.ui.* at some point after One UI 6 - confirmed broken
                     // (ActivityNotFoundException) on a One UI 8/Android 16 S26 Ultra;
                     // the action string itself is unchanged. Try the current path first.
-                    val intent =
-                        Intent("com.samsung.android.sm.ACTION_BATTERY").apply {
-                            setComponent(ComponentName("com.samsung.android.lool", "com.samsung.android.sm.battery.ui.BatteryActivity"))
-                            flags = defaultFlags
-                        }
-                    context.startActivity(intent)
+                    context.startActivity(currentComponentIntent(context))
                 }.recoverCatching {
                     // Old One UI path, in case an older device still uses it.
                     val intent =
