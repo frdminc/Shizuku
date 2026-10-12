@@ -240,18 +240,13 @@ class BehaviorSettingsFragment :
 
         findPreference<TwoStatePreference>(KEY_LIVE_ACTIVITY_ENABLED)?.setOnPreferenceChangeListener { _, newValue ->
             val enable = newValue as Boolean
-            val ctx = requireContext()
-            val svcIntent = Intent(ctx, ShizukuLiveService::class.java)
-            if (enable) {
-                if (!ShizukuSettings.getWatchdog() && !WatchdogService.isRunning()) {
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                        ctx.startForegroundService(svcIntent)
-                    } else {
-                        ctx.startService(svcIntent)
-                    }
-                }
-            } else {
-                ctx.stopService(svcIntent)
+            // Live activity is shown only inside the Watchdog's notification (1001). The switch
+            // no longer starts ShizukuLiveService: with the Watchdog on it only decides whether
+            // 1001 carries the live text. Turning it off stops any legacy live service still
+            // running and clears the live text from the Watchdog's notification.
+            if (!enable) {
+                val ctx = requireContext()
+                ctx.stopService(Intent(ctx, ShizukuLiveService::class.java))
                 LiveActivityNotificationManager.dismiss(ctx)
             }
             true

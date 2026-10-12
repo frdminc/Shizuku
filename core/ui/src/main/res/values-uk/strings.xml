@@ -796,7 +796,6 @@
     <string name="home_companion_install">Встановити</string>
     <string name="watchdog_open_stock_shizuku">Відкрити звичайний Shizuku</string>
     <string name="settings_live_activity">Сповіщення про активність у реальному часі</string>
-    <string name="settings_live_activity_summary">Показувати активність служби в реальному часі в рядку стану</string>
     <string name="app_management_empty">Додатків не знайдено</string>
     <string name="app_management_search_hint">Пошук додатків</string>
     <string name="root_hub_title">Хаб сумісності Root</string>

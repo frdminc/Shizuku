@@ -22,4 +22,11 @@ class ActivityLogSettingsImpl : ActivityLogSettings {
         if (!ShizukuSettings.isLiveActivityEnabled()) return
         LiveActivityNotificationManager.show(af.shizuku.manager.ShizukuApplication.appContext, "$appName: $action")
     }
+
+    override fun showWarningNotification(
+        title: String,
+        message: String,
+    ) {
+        LiveActivityNotificationManager.showWarning(af.shizuku.manager.ShizukuApplication.appContext, title, message)
+    }
 }

@@ -1047,7 +1047,6 @@
 
     <!-- App picker dialog -->
     <string name="settings_live_activity">Live Activity Notifications</string>
-    <string name="settings_live_activity_summary">status bar میں real-time service activity دکھائیں</string>
     <string name="app_management_empty">کوئی ایپ نہیں ملی</string>
     <string name="app_management_search_hint">ایپس تلاش کریں</string>
 

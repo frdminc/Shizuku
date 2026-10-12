@@ -819,7 +819,6 @@
     <string name="home_companion_install">설치</string>
     <string name="watchdog_open_stock_shizuku">기본 Shizuku 열기</string>
     <string name="settings_live_activity">실시간 활동 알림</string>
-    <string name="settings_live_activity_summary">상태 표시줄에 실시간 서비스 활동 표시</string>
     <!-- App picker dialog -->
     <string name="app_management_empty">앱을 찾을 수 없습니다</string>
     <string name="app_management_search_hint">앱 검색</string>

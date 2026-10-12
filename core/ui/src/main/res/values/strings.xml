@@ -854,7 +854,7 @@
     <string name="home_companion_install">Install</string>
     <string name="watchdog_open_stock_shizuku">Open Stock Shizuku</string>
     <string name="settings_live_activity">Live Activity Notifications</string>
-    <string name="settings_live_activity_summary">Show real-time service activity in the status bar</string>
+    <string name="settings_live_activity_summary">Show real-time service activity in the Watchdog notification</string>
     <!-- App picker dialog -->
     <string name="app_management_empty">No apps found</string>
     <string name="app_management_search_hint">Search apps</string>

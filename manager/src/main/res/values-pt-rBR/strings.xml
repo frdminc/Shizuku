@@ -1082,7 +1082,6 @@ Impressão digital da chave RSA:
     <string name="watchdog_open_stock_shizuku">Abrir Shizuku Padrão</string>
 
     <string name="settings_live_activity">Notificações de Atividade ao Vivo</string>
-    <string name="settings_live_activity_summary">Exibir atividade do serviço em tempo real na barra de status</string>
 
     <!--Diálogo de seleção de aplicativos-->
     <string name="app_management_empty">Nenhum aplicativo encontrado</string>

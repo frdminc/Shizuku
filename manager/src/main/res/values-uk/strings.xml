@@ -1122,7 +1122,6 @@
     <string name="watchdog_open_stock_shizuku">Відкрити стоковий Shizuku</string>
 
     <string name="settings_live_activity">Сповіщення Live Activity</string>
-    <string name="settings_live_activity_summary">Показувати активність служби в реальному часі в рядку стану</string>
 
     <!-- App picker dialog -->
     <string name="app_management_empty">Додатки не знайдено</string>

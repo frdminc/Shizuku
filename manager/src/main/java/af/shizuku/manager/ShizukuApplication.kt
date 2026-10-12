@@ -223,18 +223,18 @@ class ShizukuApplication :
                     }
 
                     // 5. Drop BackgroundServiceStartNotAllowedException / IllegalStateException
-                    // thrown when the OS refuses to start ShizukuLiveService from background.
-                    // These are caught at the call-site; Sentry captures them via the global
-                    // uncaught handler before our catch block in older SDK versions. They are
-                    // expected on API 31+ when the app is backgrounded.
+                    // thrown when the OS refuses to start a foreground service from the background
+                    // (e.g. AutomationService). These are caught at the call-site; Sentry captures
+                    // them via the global uncaught handler before our catch block in older SDK
+                    // versions. They are expected on API 31+ when the app is backgrounded.
                     val simpleName = throwable?.javaClass?.simpleName ?: ""
                     if (simpleName == "BackgroundServiceStartNotAllowedException" ||
                         (
                             throwable is IllegalStateException &&
                                 (
                                     throwable.message?.contains("startForegroundService") == true ||
-                                        // Plain startService() from background on API 31+ (AutomationService /
-                                        // ShizukuLiveService). Already caught at the call site; expected, not a bug.
+                                        // Plain startService() from background on API 31+ (AutomationService).
+                                        // Already caught at the call site; expected, not a bug.
                                         throwable.message?.contains("Not allowed to start service") == true
                                 )
                         )
@@ -743,21 +743,6 @@ class ShizukuApplication :
         try {
             initializeManagers()
             initPeerSettingsSync()
-            // When Watchdog is on, WatchdogService carries the live notification (1001) (#33)
-            if (!ShizukuSettings.getWatchdog() && ShizukuSettings.isLiveActivityEnabled()) {
-                try {
-                    // startForegroundService() is required on API 26+ to start from background;
-                    // plain startService() throws BackgroundServiceStartNotAllowedException on API 31+.
-                    val liveServiceIntent = Intent(this, af.shizuku.manager.service.ShizukuLiveService::class.java)
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                        startForegroundService(liveServiceIntent)
-                    } else {
-                        startService(liveServiceIntent)
-                    }
-                } catch (e: Exception) {
-                    Timber.w(e, "Failed to start ShizukuLiveService")
-                }
-            }
         } catch (e: Throwable) {
             Timber.e(e, "Failed to initialize managers")
             Sentry.captureException(e)

@@ -46,9 +46,10 @@ import java.time.Duration
  * Review fix: a startForegroundService() start of ShizukuLiveService while the Watchdog runs still
  * calls startForeground() before stopping (a start that stops without it crashes on API 26+).
  * Follow-ups: a second crash within the recovery window posts one heads-up and no stale recovery
- * line; the live service's onCreate collector never re-posts 9999 under the Watchdog (the server
- * RUNNING); live activity with the Watchdog off still posts 9999 as before; setWatchdog(false)
- * stops a running ShizukuLiveService.
+ * line; the live service — now a minimal stub — never posts 9999 whether the server is RUNNING or
+ * not. Live activity now shows only inside the Watchdog's notification: with the Watchdog off
+ * a ShizukuLiveService started anyway posts nothing and stops, and the live-activity switch starts
+ * nothing and posts nothing.
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35], application = Application::class)
@@ -296,7 +297,59 @@ class WatchdogFollowUpScenariosTest {
         }
 
     @Test
-    fun `watchdog-off-with-live-activity-on-still-posts-live-notification-9999`() =
+    fun `show-with-watchdog-off-posts-neither-9999-nor-1001`() =
+        scenario {
+            world.prefs
+                .edit()
+                .putBoolean(ShizukuSettings.Keys.KEY_WATCHDOG, false)
+                .putBoolean(ShizukuSettings.Keys.KEY_LIVE_ACTIVITY_ENABLED, true)
+                .commit()
+
+            // With the Watchdog off, a live-status entry posts nothing at all: no 9999, and no
+            // Watchdog 1001 (there is no Watchdog notification to carry it).
+            LiveActivityNotificationManager.show(app, "x")
+            world.settle()
+
+            assertNull("no live notification 9999 with the Watchdog off", getActiveNotification(9999))
+            assertNull("no watchdog notification 1001 with the Watchdog off", getActiveNotification(1001))
+        }
+
+    @Test
+    fun `destroying-the-live-service-keeps-1001s-live-text`() =
+        scenario {
+            world.prefs
+                .edit()
+                .putBoolean(ShizukuSettings.Keys.KEY_WATCHDOG, true)
+                .putBoolean(ShizukuSettings.Keys.KEY_LIVE_ACTIVITY_ENABLED, true)
+                .commit()
+
+            watchdog = Robolectric.buildService(WatchdogService::class.java).create()
+            LiveActivityNotificationManager.show(app, "x")
+            world.settle()
+
+            // The stub live service is started (an old intent) and then destroyed: its onDestroy
+            // must cancel only 9999 and leave 1001's live text untouched.
+            liveService =
+                Robolectric
+                    .buildService(ShizukuLiveService::class.java)
+                    .create()
+                    .startCommand(0, 0)
+            world.settle()
+            liveService!!.destroy()
+            liveService = null
+            world.settle()
+
+            val notif1001 = getActiveNotification(1001)
+            assertNotNull("watchdog notification 1001 remains", notif1001)
+            assertEquals(
+                "watchdog notification 1001 keeps its live text after the live service is destroyed",
+                "x",
+                notif1001!!.extras.getCharSequence(Notification.EXTRA_TEXT)?.toString(),
+            )
+        }
+
+    @Test
+    fun `watchdog-off-live-service-start-posts-nothing-and-stops`() =
         scenario {
             serverStarted()
             world.prefs
@@ -305,28 +358,26 @@ class WatchdogFollowUpScenariosTest {
                 .putBoolean(ShizukuSettings.Keys.KEY_LIVE_ACTIVITY_ENABLED, true)
                 .commit()
 
-            // The live service runs as before this change (only the Watchdog-on case routes to
-            // 1001): with the Watchdog off it posts 9999 on RUNNING and keeps it foreground.
+            // Live activity is shown only inside the Watchdog's notification (1001). With the
+            // Watchdog off there must be no 9999 at all: a ShizukuLiveService started anyway (an
+            // old intent, a sticky restore) still reaches startForeground(), then posts nothing
+            // and stops.
             liveService =
                 Robolectric
                     .buildService(ShizukuLiveService::class.java)
                     .create()
                     .startCommand(0, 0)
             world.settle()
-            assertNotNull("live notification 9999 posted with the Watchdog off", getActiveNotification(9999))
 
-            // The live-status entry the activity log routes through (LiveActivityNotificationManager
-            // .show) still goes to 9999 itself, not to the Watchdog's 1001 as when both are on.
-            LiveActivityNotificationManager.show(app, "Settings: opened")
-            world.settle()
-            val notif9999 = getActiveNotification(9999)
-            assertNotNull("live notification 9999 still posted", notif9999)
+            val service = liveService!!.get()
+            assertNull("no live notification 9999 with the Watchdog off", getActiveNotification(9999))
+            assertTrue("live service stopped itself", shadowOf(service).isStoppedBySelf)
             assertEquals(
-                "live notification 9999 carries the live text",
-                "Settings: opened",
-                notif9999!!.extras.getCharSequence(Notification.EXTRA_TEXT)?.toString(),
+                "live service reached startForeground before stopping",
+                LiveActivityNotificationManager.NOTIFICATION_ID,
+                shadowOf(service).lastForegroundNotificationId,
             )
-            assertNull("no watchdog notification 1001 posted with the Watchdog off", getActiveNotification(1001))
+            assertNull("no watchdog notification 1001 with the Watchdog off", getActiveNotification(1001))
         }
 
     // --- Issue #34: Turning Watchdog off leaves no Watchdog or live persistent notifications ---
@@ -353,56 +404,31 @@ class WatchdogFollowUpScenariosTest {
         }
 
     @Test
-    fun `switching-watchdog-off-stops-the-running-live-service`() =
+    fun `watchdog-off-live-activity-switch-starts-nothing-and-posts-nothing`() =
         scenario {
-            serverStarted()
             world.prefs
                 .edit()
                 .putBoolean(ShizukuSettings.Keys.KEY_WATCHDOG, false)
-                .putBoolean(ShizukuSettings.Keys.KEY_LIVE_ACTIVITY_ENABLED, true)
+                .putBoolean(ShizukuSettings.Keys.KEY_LIVE_ACTIVITY_ENABLED, false)
                 .commit()
 
-            // The live service is running (the Watchdog is off): 9999 posted, not stopped.
-            liveService =
-                Robolectric
-                    .buildService(ShizukuLiveService::class.java)
-                    .create()
-                    .startCommand(0, 0)
-            world.settle()
-            assertNotNull("live notification 9999 posted while the live service runs", getActiveNotification(9999))
-            assertFalse("live service not stopped by itself", shadowOf(liveService!!.get()).isStoppedBySelf)
+            val (_, fragment) = createBehaviorFragment()
+            val pref =
+                fragment.findPreference<TwoStatePreference>(ShizukuSettings.Keys.KEY_LIVE_ACTIVITY_ENABLED)
+            assertNotNull("live-activity preference exists", pref)
 
-            // The Watchdog is turned on next (its service starts; its onCreate asks the system to
-            // stop the legacy live service, which has not landed yet — the window where both run).
-            world.prefs
-                .edit()
-                .putBoolean(ShizukuSettings.Keys.KEY_WATCHDOG, true)
-                .commit()
-            watchdog = Robolectric.buildService(WatchdogService::class.java).create()
+            // Turning the live-activity switch on with the Watchdog off must start no service and
+            // post no 9999: live activity is shown only inside the Watchdog's notification.
+            pref!!.callChangeListener(true)
             world.settle()
 
-            // Swallow the Watchdog's own stop request of the live service so the assertion below
-            // is about setWatchdog(false)'s stop, not that earlier one.
-            var swallowedStops = 0
-            while (shadowOf(app).nextStoppedService != null) swallowedStops++
-            assertTrue(
-                "the Watchdog's onCreate asked to stop the legacy live service",
-                swallowedStops >= 1,
-            )
-
-            ShizukuSettings.setWatchdog(app, false)
-            world.settle()
-
-            // setWatchdog(false) stops the running live service (before the Watchdog's own).
-            val stopped = shadowOf(app).nextStoppedService
-            assertNotNull("a service was stopped by setWatchdog(false)", stopped)
-            assertEquals(
-                "setWatchdog(false) stops the running live service",
-                ShizukuLiveService::class.java.name,
-                stopped!!.component?.className,
-            )
-            assertNull("watchdog notification 1001 is dismissed", getActiveNotification(1001))
-            assertNull("live notification 9999 is dismissed", getActiveNotification(9999))
+            var liveStarts = 0
+            while (true) {
+                val intent = shadowOf(app).nextStartedService ?: break
+                if (intent.component?.className == ShizukuLiveService::class.java.name) liveStarts++
+            }
+            assertEquals("the live-activity switch starts no ShizukuLiveService", 0, liveStarts)
+            assertNull("the live-activity switch posts no live notification 9999", getActiveNotification(9999))
         }
 
     // --- Review fix: a startForegroundService() start of the live service while the Watchdog runs ---
@@ -441,12 +467,11 @@ class WatchdogFollowUpScenariosTest {
         }
 
     @Test
-    fun `live-service-start-with-watchdog-on-and-server-running-never-reposts-9999`() =
+    fun `live-service-start-with-watchdog-on-and-server-running-posts-nothing-and-stops`() =
         scenario {
             // The state machine is RUNNING when the live service starts (a sticky restart of it
-            // after process death, say) with the Watchdog on: onStartCommand stops the service
-            // and removes 9999, and the onCreate collector — which the looper runs afterwards —
-            // must not post 9999 again while the Watchdog owns the notification.
+            // after process death, say) with the Watchdog on: the stub service still reaches
+            // startForeground(), posts nothing and stops, leaving 1001 as the only notification.
             serverStarted()
             world.prefs
                 .edit()
