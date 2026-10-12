@@ -31,7 +31,8 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
- * A loopback adbd speaking the plain (non-TLS) AUTH handshake. Each key offer made while the key
+ * A loopback adbd speaking AUTH by default, or optional STLS with a fresh certificate per
+ * connection. Each key offer made while the key
  * is not yet authorised counts as one dialog ([offers]) and then waits, as adbd does, for the
  * user's answer. [accept] completes the handshake. [reject] and [silent] look the same on the
  * wire, as on a real device: adbd sends nothing for a denied dialog and keeps the connection open
@@ -48,6 +49,8 @@ class FakeAdbd(
     authorized: Boolean = false,
     // "tcpip:<port>": adbd restarts listening on that port (the caller opens it).
     private val onTcpip: (Int) -> Unit = {},
+    private val tls: Boolean = false,
+    private val silentHello: Boolean = false,
 ) : Closeable {
     enum class Answer { ACCEPT, REJECT, SILENT }
 
@@ -61,6 +64,11 @@ class FakeAdbd(
 
     private val offerCount = AtomicInteger(0)
     val offers: Int get() = offerCount.get()
+    private val signatureCount = AtomicInteger(0)
+    val signatures: Int get() = signatureCount.get()
+    val activeConnections: Int get() = open.size
+    val certificates = CopyOnWriteArrayList<java.security.cert.X509Certificate>()
+    val greetingSizes = CopyOnWriteArrayList<Int>()
 
     private val helloCount = AtomicInteger(0)
 
@@ -133,31 +141,49 @@ class FakeAdbd(
     private fun serve(s: Socket) {
         try {
             val stream = PushbackInputStream(s.getInputStream())
-            val input = DataInputStream(stream)
-            val output = s.getOutputStream()
+            var input = DataInputStream(stream)
+            var output = s.getOutputStream()
             val hello = read(input) ?: return
             if (hello.command != A_CNXN) return
+            greetingSizes += hello.toByteArray().size
             helloCount.incrementAndGet()
             onHello()
-            write(output, AdbMessage(A_AUTH, ADB_AUTH_TOKEN, 0, ByteArray(20)))
-            val signature = read(input) ?: return
-            check(signature.command == A_AUTH && signature.arg0 == ADB_AUTH_SIGNATURE) { "expected the token signature" }
-            if (!authorized) {
+            if (silentHello) {
+                // Wait for EOF, so tests observe the client's deadline closing the socket.
+                while (input.read() != -1) { }
+                return
+            }
+            if (tls) {
+                write(output, AdbMessage(af.shizuku.manager.adb.AdbProtocol.A_STLS, 0x01000000, 0, ByteArray(0)))
+                check(read(input)?.command == af.shizuku.manager.adb.AdbProtocol.A_STLS)
+                val socket = newTlsContext().socketFactory.createSocket(s, "127.0.0.1", s.port, true) as javax.net.ssl.SSLSocket
+                socket.useClientMode = false
+                socket.needClientAuth = true
+                socket.startHandshake()
+                input = DataInputStream(socket.inputStream)
+                output = socket.outputStream
+            } else {
                 write(output, AdbMessage(A_AUTH, ADB_AUTH_TOKEN, 0, ByteArray(20)))
-                while (true) {
-                    val key = read(input) ?: return
-                    check(key.command == A_AUTH && key.arg0 == ADB_AUTH_RSAPUBLICKEY) { "expected the public key" }
-                    offerCount.incrementAndGet()
-                    offered.release()
-                    when (awaitAnswer(s, stream)) {
-                        Answer.ACCEPT -> break
-                        // Nothing is sent: the connection stays open until the client closes it
-                        // or offers the key again.
-                        Answer.REJECT, Answer.SILENT -> continue
-                        null -> return
+                val signature = read(input) ?: return
+                check(signature.command == A_AUTH && signature.arg0 == ADB_AUTH_SIGNATURE) { "expected the token signature" }
+                signatureCount.incrementAndGet()
+                if (!authorized) {
+                    write(output, AdbMessage(A_AUTH, ADB_AUTH_TOKEN, 0, ByteArray(20)))
+                    while (true) {
+                        val key = read(input) ?: return
+                        check(key.command == A_AUTH && key.arg0 == ADB_AUTH_RSAPUBLICKEY) { "expected the public key" }
+                        offerCount.incrementAndGet()
+                        offered.release()
+                        when (awaitAnswer(s, stream)) {
+                            Answer.ACCEPT -> break
+                            // Nothing is sent: the connection stays open until the client closes it
+                            // or offers the key again.
+                            Answer.REJECT, Answer.SILENT -> continue
+                            null -> return
+                        }
                     }
+                    authorized = true
                 }
-                authorized = true
             }
             write(output, AdbMessage(A_CNXN, A_VERSION, A_MAXDATA, "device::"))
             while (true) {
@@ -176,6 +202,34 @@ class FakeAdbd(
             open -= s
             runCatching { s.close() }
         }
+    }
+
+    /** Each accepted connection gets a fresh self-signed certificate, like adbd. */
+    private fun newTlsContext(): javax.net.ssl.SSLContext {
+        val pair = java.security.KeyPairGenerator.getInstance("RSA").apply { initialize(2048) }.generateKeyPair()
+        val name = org.bouncycastle.asn1.x500.X500Name("CN=fake-adbd")
+        val now = System.currentTimeMillis()
+        val builder = org.bouncycastle.cert.jcajce.JcaX509v3CertificateBuilder(
+            name, java.math.BigInteger(128, java.security.SecureRandom()),
+            java.util.Date(now - 60_000), java.util.Date(now + 3_600_000), name, pair.public,
+        )
+        val encoded = builder.build(org.bouncycastle.operator.jcajce.JcaContentSignerBuilder("SHA256withRSA").build(pair.private)).encoded
+        val cert = java.security.cert.CertificateFactory.getInstance("X.509")
+            .generateCertificate(encoded.inputStream()) as java.security.cert.X509Certificate
+        certificates += cert
+        val store = java.security.KeyStore.getInstance("PKCS12").apply {
+            load(null, null)
+            setKeyEntry("server", pair.private, charArrayOf(), arrayOf(cert))
+        }
+        val keys = javax.net.ssl.KeyManagerFactory.getInstance(javax.net.ssl.KeyManagerFactory.getDefaultAlgorithm()).apply {
+            init(store, charArrayOf())
+        }
+        val trust = object : javax.net.ssl.X509TrustManager {
+            override fun getAcceptedIssuers(): Array<java.security.cert.X509Certificate> = emptyArray()
+            override fun checkClientTrusted(chain: Array<out java.security.cert.X509Certificate>, authType: String) { }
+            override fun checkServerTrusted(chain: Array<out java.security.cert.X509Certificate>, authType: String) { }
+        }
+        return javax.net.ssl.SSLContext.getInstance("TLSv1.3").apply { init(keys.keyManagers, arrayOf(trust), null) }
     }
 
     // Polls rather than blocking on the queue so that a connection the client has already closed

@@ -70,6 +70,7 @@ object AdbStarter {
         port: Int,
         log: ((String) -> Unit)? = null,
         attempt: Long = AdbAuthWait.NO_ATTEMPT,
+        connectedClient: AdbClient? = null,
     ) {
         HeadlessLogger.init(context)
         if (port !in 1..65535) {
@@ -131,6 +132,15 @@ object AdbStarter {
                 }
 
                 var activePort = port
+                var retained = connectedClient
+                fun nextClient(): AdbClient {
+                    val connected = retained
+                    retained = null
+                    return connected ?: AdbClient("127.0.0.1", activePort, key, onPending)
+                }
+                suspend fun connectUnlessRetained(client: AdbClient) {
+                    if (client !== connectedClient) connectWithRetry(client, activePort)
+                }
                 val tcpMode = ShizukuSettings.getTcpMode()
                 val tcpPort = ShizukuSettings.getTcpPort()
                 HeadlessLogger.i(LOG, "start on port $port (tcp_mode=$tcpMode tcp_port=$tcpPort interactive=${log != null})")
@@ -142,8 +152,8 @@ object AdbStarter {
                         Timber.tag(TAG).d("Switching ADB from port %d to TCP port %d", activePort, tcpPort)
                         log?.invoke("Connecting on port $activePort...")
 
-                        AdbClient("127.0.0.1", activePort, key, onPending).use { client ->
-                            connectWithRetry(client, activePort)
+                        nextClient().use { client ->
+                            connectUnlessRetained(client)
 
                             log?.invoke("Successfully connected on port $activePort...")
                             log?.invoke("\nRestarting in TCP mode port: $tcpPort")
@@ -160,8 +170,8 @@ object AdbStarter {
                 Timber.tag(TAG).i("Connecting to ADB daemon at 127.0.0.1:%d", activePort)
                 log?.invoke("Connecting on port $activePort...")
 
-                AdbClient("127.0.0.1", activePort, key, onPending).use { client ->
-                    connectWithRetry(client, activePort)
+                nextClient().use { client ->
+                    connectUnlessRetained(client)
                     Timber.tag(TAG).i("Connected to ADB at 127.0.0.1:%d; deploying starter command", activePort)
                     HeadlessLogger.i(LOG, "connected on $activePort; running the starter")
                     log?.invoke("Successfully connected on port $activePort...\n")
@@ -170,7 +180,9 @@ object AdbStarter {
                         client.runCommand("shell:cmd appops set ${context.packageName} ACCESS_RESTRICTED_SETTINGS allow")
                         client.runCommand("shell:pm grant ${context.packageName} android.permission.WRITE_SECURE_SETTINGS")
                     }.onFailure { Timber.tag(TAG).w(it, "Failed to auto-elevate privileges on ADB start") }
-                    ShizukuSettings.setLastPort(activePort)
+                    // A port found by the loopback scan is not saved: the next first attempt dials the
+                    // saved port with an ordinary client, and only mDNS or a TCP port should seed it.
+                    if (client !== connectedClient) ShizukuSettings.setLastPort(activePort)
                     AdbAuthWait.clearUnanswered()
                     ManagerActivityLog.log(context, "Service started via ADB on port $activePort")
                     ShizukuStateMachine.update()

@@ -2,7 +2,9 @@ package af.shizuku.manager
 
 import af.shizuku.api.BinderContainer
 import af.shizuku.manager.utils.Logger.LOGGER
+import af.shizuku.manager.utils.ManagerActivityLog
 import af.shizuku.manager.utils.ShizukuStateMachine
+import android.os.Binder
 import android.os.Bundle
 import androidx.core.os.bundleOf
 import rikka.shizuku.Shizuku
@@ -26,6 +28,16 @@ class ShizukuManagerProvider : ShizukuProvider() {
         extras: Bundle?,
     ): Bundle? {
         if (extras == null) return null
+
+        if (method == METHOD_SEND_BINDER) {
+            // Read the kernel-provided caller identity before any binder handoff or IPC.
+            val uid = Binder.getCallingUid()
+            // The starter runs the server as root, system or shell (starter.cpp), so those three are accepted.
+            if (uid != 0 && uid != 1000 && uid != 2000) {
+                context?.let { ManagerActivityLog.log(it, "Service connection ignored: caller uid $uid is not root, system or shell") }
+                return null
+            }
+        }
 
         return if (method == METHOD_SEND_USER_SERVICE) {
             try {

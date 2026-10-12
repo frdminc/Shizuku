@@ -157,11 +157,25 @@ object WirelessDebugging {
             context: Context,
             onPort: (Int) -> Unit,
         ): () -> Unit
+
+        /** Fake discoveries opt in explicitly: existing scenarios must never scan real ports. */
+        fun scan(context: Context, onResult: (ScanResult) -> Unit): (() -> Unit)? = null
     }
+
+    data class ScanResult(val port: Int, val client: AdbClient?)
+
+    private fun realDiscovery() = object : PortDiscovery {
+        override fun start(context: Context, onPort: (Int) -> Unit) = startMdns(context, onPort)
+        override fun scan(context: Context, onResult: (ScanResult) -> Unit) =
+            if (available()) LoopbackAdbScan.start(context, onResult) else null
+    }
+
+    @Volatile
+    internal var scanBudgetMs = 12_000L
 
     // Test seams (FakeWorld). Real defaults.
     @Volatile
-    internal var discovery: PortDiscovery = PortDiscovery(::startMdns)
+    internal var discovery: PortDiscovery = realDiscovery()
 
     private fun startMdns(
         context: Context,
@@ -223,7 +237,8 @@ object WirelessDebugging {
 
     internal fun resetForTesting() {
         unlockWatch.set(null)
-        discovery = PortDiscovery(::startMdns)
+        discovery = realDiscovery()
+        scanBudgetMs = 12_000L
         wifiWaitMs = 120_000L
         userWaitMs = 300_000L
         backgroundBudgetMs = 240_000L
@@ -967,6 +982,14 @@ object WirelessDebugging {
         private val quiet: Boolean = false,
         private val tcpPortOpen: (suspend () -> Boolean)? = null,
     ) {
+        var scannedClient: AdbClient? = null
+            private set
+
+        fun closeConnection() {
+            scannedClient?.abort()
+            scannedClient?.close()
+            scannedClient = null
+        }
         // adb_wifi_enabled before this start (or a run of it that died) first touched it.
         private var initial: Int? = null
 
@@ -1066,6 +1089,7 @@ object WirelessDebugging {
 
         /** If this start (or a run of it that died) turned wireless debugging on, turns it off again. */
         fun restore() {
+            closeConnection()
             // Still 1 at the end of the run: the system accepted the write, which raised no
             // prompt, however the run ended (an mDNS timeout, the budget, Cancel, a stop).
             if (setting(context) == 1) setWritePending(context, false)
@@ -1167,14 +1191,25 @@ object WirelessDebugging {
             // Already on but announcing nothing: turn it off and on once for a fresh announcement.
             var mayToggle = before == 1
             val found = AtomicInteger(0)
-            val stop = discovery.start(context) { p -> found.compareAndSet(0, p) }
+            val winnerLock = Any()
+            var accepting = true
+            var scanned = false
+            var scanStarted = false
+            var stopScan: () -> Unit = {}
+            val stop = discovery.start(context) { p ->
+                synchronized(winnerLock) {
+                    if (accepting && p in 1..65535) found.compareAndSet(0, p)
+                }
+            }
             try {
                 var deadline = elapsedMs() + discoveryMs
                 while (true) {
                     val port = found.get()
                     if (port > 0) {
                         setWritePending(context, false)
-                        note("mDNS found port $port")
+                        val path = if (scanned) "scan" else "mDNS"
+                        note("$path found port $port")
+                        af.shizuku.manager.utils.ManagerActivityLog.log(context, "Wireless ADB $path found port $port")
                         return Round.Found(port)
                     }
                     if (setting(context) == 0) {
@@ -1235,6 +1270,26 @@ object WirelessDebugging {
                         deadline = elapsedMs() + discoveryMs
                     } else if (elapsedMs() >= minOf(deadline, sessionDeadline())) {
                         if (!mayToggle || elapsedMs() >= sessionDeadline()) {
+                            if (!scanStarted && remaining() > 0) {
+                                scanStarted = true
+                                deadline = minOf(elapsedMs() + scanBudgetMs, sessionDeadline())
+                                val scanStop = discovery.scan(context) { result ->
+                                    synchronized(winnerLock) {
+                                        if (accepting && result.port in 1..65535 && found.get() == 0) {
+                                            scannedClient = result.client
+                                            scanned = true
+                                            found.set(result.port)
+                                        } else {
+                                            result.client?.abort()
+                                            result.client?.close()
+                                        }
+                                    }
+                                }
+                                if (scanStop != null) {
+                                    stopScan = scanStop
+                                    continue
+                                }
+                            }
                             // On all this time: the write was accepted, no prompt.
                             if (setting(context) == 1) setWritePending(context, false)
                             warn("mDNS discovery timed out after ${discoveryMs / 1000} s (adb_wifi_enabled=${setting(context)})")
@@ -1252,7 +1307,10 @@ object WirelessDebugging {
                     delay(pollMs)
                 }
             } finally {
+                synchronized(winnerLock) { accepting = false }
+                stopScan()
                 stop()
+                if (kotlin.coroutines.coroutineContext[kotlinx.coroutines.Job]?.isActive == false || found.get() == 0) closeConnection()
             }
         }
 
