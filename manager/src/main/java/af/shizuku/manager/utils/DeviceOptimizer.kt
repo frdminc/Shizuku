@@ -22,7 +22,7 @@ object DeviceOptimizer {
      * and the fix commands without a real server or root shell.
      */
     @androidx.annotation.VisibleForTesting
-    var runCommandOutputForTesting: ((String) -> String?)? = null
+    internal var runCommandOutputForTesting: ((String) -> String?)? = null
 
     private fun runCommand(cmd: String): Boolean {
         if (Shizuku.pingBinder()) {
@@ -58,7 +58,7 @@ object DeviceOptimizer {
      * appops from the shell. Returns null when the command could not run, exited non-zero or took
      * longer than [COMMAND_OUTPUT_TIMEOUT_SECONDS]. Standard error is discarded, so a command that
      * writes a lot there cannot fill its pipe and stall. Root is used only when the server is not
-     * reachable: a failed read through the server never falls through to a root prompt.
+     * reachable and the app already holds root, so a read never shows a root prompt.
      */
     internal fun runCommandOutput(cmd: String): String? {
         runCommandOutputForTesting?.let { return it(cmd) }
@@ -101,7 +101,9 @@ object DeviceOptimizer {
                 }
             }
         }
-        if (EnvironmentUtils.isRooted()) {
+        if (com.topjohnwu.superuser.Shell
+                .isAppGrantedRoot() == true
+        ) {
             try {
                 val result =
                     com.topjohnwu.superuser.Shell

@@ -591,4 +591,36 @@ class VendorBatteryRestrictionScenariosTest {
                 )
             }
         }
+
+    // --- 14. every read and fix names the app's own Android user, not the shell's default ---
+
+    @Test
+    fun `every-command-names-the-apps-own-user`() =
+        scenario {
+            world.samsung()
+            setExempt(true)
+            setDeviceHardening(true)
+            val calls = mutableListOf<String>()
+            DeviceOptimizer.runCommandOutputForTesting = { cmd ->
+                calls += cmd
+                when {
+                    cmd.contains("appops get") -> "RUN_ANY_IN_BACKGROUND: ignore"
+                    cmd.contains("get-standby-bucket") -> "45"
+                    else -> "ok"
+                }
+            }
+            VendorBatteryRestrictions.applicationEnabledSettingForTesting = {
+                android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_DISABLED_UNTIL_USED
+            }
+            appStarts(upgraded = false)
+            serverStarted()
+            check {
+                val userCommands = calls.filter { it.startsWith("cmd appops") || it.startsWith("am ") || it.startsWith("pm ") }
+                assertTrue("the pass ran appops, am and pm commands", userCommands.size >= 5)
+                assertTrue(
+                    "each names --user 0: $userCommands",
+                    userCommands.all { it.contains("--user 0 ") },
+                )
+            }
+        }
 }

@@ -60,20 +60,27 @@ object VendorBatteryRestrictions {
 
     /** Tests only: force the package's enabled setting to this value. Null defers to PackageManager. */
     @androidx.annotation.VisibleForTesting
-    var applicationEnabledSettingForTesting: ((String) -> Int)? = null
+    internal var applicationEnabledSettingForTesting: ((String) -> Int)? = null
 
     /** Tests only: force [resolves] to this value. Null defers to PackageManager.resolveActivity. */
     @androidx.annotation.VisibleForTesting
-    var resolveActivityForTesting: ((Context, Intent) -> Boolean)? = null
+    internal var resolveActivityForTesting: ((Context, Intent) -> Boolean)? = null
 
     // The restriction set this process last logged. The persisted record changes only when a
     // notification is posted, so with notifications blocked this keeps an unchanged restriction
     // from being logged again at every start.
     @Volatile private var lastLogged: Set<String>? = null
 
+    // One pass at a time: two RUNNING transitions close together (a crash, then a quick
+    // Watchdog restart) would otherwise race on lastLogged and the persisted record.
+    private val passRunning =
+        java.util.concurrent.atomic
+            .AtomicBoolean(false)
+
     @androidx.annotation.VisibleForTesting
     internal fun resetForTesting() {
         lastLogged = null
+        passRunning.set(false)
     }
 
     private class Finding(
@@ -91,6 +98,15 @@ object VendorBatteryRestrictions {
      */
     suspend fun check(context: Context) {
         if (!ShizukuSettings.getWatchdog()) return
+        if (!passRunning.compareAndSet(false, true)) return
+        try {
+            runPass(context)
+        } finally {
+            passRunning.set(false)
+        }
+    }
+
+    private suspend fun runPass(context: Context) {
         val pkg = context.packageName
         val hardening = ShizukuSettings.isDeviceHardeningEnabled()
 
@@ -123,13 +139,13 @@ object VendorBatteryRestrictions {
         pkg: String,
         hardening: Boolean,
     ): Finding? {
-        val read = DeviceOptimizer.runCommandOutput("cmd appops get $pkg RUN_ANY_IN_BACKGROUND") ?: return null
+        val read = DeviceOptimizer.runCommandOutput("cmd appops get --user $USER $pkg RUN_ANY_IN_BACKGROUND") ?: return null
         if (!read.contains("RUN_ANY_IN_BACKGROUND: ignore")) return null
-        val fixed = hardening && DeviceOptimizer.runCommandOutput("cmd appops set $pkg RUN_ANY_IN_BACKGROUND allow") != null
+        val fixed = hardening && DeviceOptimizer.runCommandOutput("cmd appops set --user $USER $pkg RUN_ANY_IN_BACKGROUND allow") != null
         val stillRestricted =
             if (fixed) {
                 DeviceOptimizer
-                    .runCommandOutput("cmd appops get $pkg RUN_ANY_IN_BACKGROUND")
+                    .runCommandOutput("cmd appops get --user $USER $pkg RUN_ANY_IN_BACKGROUND")
                     ?.contains("RUN_ANY_IN_BACKGROUND: ignore") != false
             } else {
                 true
@@ -141,12 +157,12 @@ object VendorBatteryRestrictions {
         pkg: String,
         hardening: Boolean,
     ): Finding? {
-        val read = DeviceOptimizer.runCommandOutput("am get-standby-bucket $pkg") ?: return null
+        val read = DeviceOptimizer.runCommandOutput("am get-standby-bucket --user $USER $pkg") ?: return null
         if (read.trim() != "45") return null
-        val fixed = hardening && DeviceOptimizer.runCommandOutput("am set-standby-bucket $pkg active") != null
+        val fixed = hardening && DeviceOptimizer.runCommandOutput("am set-standby-bucket --user $USER $pkg active") != null
         val stillRestricted =
             if (fixed) {
-                DeviceOptimizer.runCommandOutput("am get-standby-bucket $pkg")?.trim() == "45"
+                DeviceOptimizer.runCommandOutput("am get-standby-bucket --user $USER $pkg")?.trim() == "45"
             } else {
                 true
             }
@@ -161,7 +177,7 @@ object VendorBatteryRestrictions {
         hardening: Boolean,
     ): Finding? {
         if (applicationEnabledSetting(context, pkg) != PackageManager.COMPONENT_ENABLED_STATE_DISABLED_UNTIL_USED) return null
-        val fixed = hardening && DeviceOptimizer.runCommandOutput("pm enable $pkg") != null
+        val fixed = hardening && DeviceOptimizer.runCommandOutput("pm enable --user $USER $pkg") != null
         val stillDisabled =
             if (fixed) {
                 applicationEnabledSetting(context, pkg) == PackageManager.COMPONENT_ENABLED_STATE_DISABLED_UNTIL_USED
@@ -182,14 +198,14 @@ object VendorBatteryRestrictions {
         pkg: String,
         hardening: Boolean,
     ): Finding? {
-        val read = DeviceOptimizer.runCommandOutput("cmd appops get $pkg 10008") ?: return null
+        val read = DeviceOptimizer.runCommandOutput("cmd appops get --user $USER $pkg 10008") ?: return null
         // Only an explicit mode is a restriction: "No operations." (no recorded mode) or an unknown
         // op on another build is not evidence either way.
         if (!AUTOSTART_DENIED.containsMatchIn(read)) return null
-        val fixed = hardening && DeviceOptimizer.runCommandOutput("cmd appops set $pkg 10008 allow") != null
+        val fixed = hardening && DeviceOptimizer.runCommandOutput("cmd appops set --user $USER $pkg 10008 allow") != null
         val stillRestricted =
             if (fixed) {
-                DeviceOptimizer.runCommandOutput("cmd appops get $pkg 10008")?.let { AUTOSTART_DENIED.containsMatchIn(it) } != false
+                DeviceOptimizer.runCommandOutput("cmd appops get --user $USER $pkg 10008")?.let { AUTOSTART_DENIED.containsMatchIn(it) } != false
             } else {
                 true
             }
@@ -326,11 +342,13 @@ object VendorBatteryRestrictions {
         intent: Intent,
     ): Boolean =
         resolveActivityForTesting?.invoke(context, intent)
-            ?: context.packageManager.resolveActivity(intent, 0)?.activityInfo.let { info ->
+            ?: context.packageManager.resolveActivity(intent, PackageManager.MATCH_DEFAULT_ONLY)?.activityInfo.let { info ->
                 // resolveActivity also finds activities other apps may not start; a tap on those
                 // would do nothing, so they fall back to the app's settings page.
                 info != null &&
                     info.exported &&
+                    // Only the vendor's own system app, not an installed app that took its name.
+                    (info.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_SYSTEM) != 0 &&
                     (info.permission == null || context.checkSelfPermission(info.permission) == PackageManager.PERMISSION_GRANTED)
             }
 
@@ -382,6 +400,12 @@ object VendorBatteryRestrictions {
         val brand = Build.BRAND.orEmpty().lowercase()
         return manufacturer in XIAOMI_NAMES || brand in XIAOMI_NAMES
     }
+
+    // The Android user this copy of the app runs as. Without --user, appops and am act on the
+    // foreground user and pm on user 0, which for a copy in a work or clone profile is another
+    // copy of the app.
+    private val USER: Int
+        get() = android.os.Process.myUid() / 100000
 
     private val XIAOMI_NAMES = setOf("xiaomi", "redmi", "poco")
 
