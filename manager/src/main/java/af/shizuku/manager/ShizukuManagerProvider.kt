@@ -22,6 +22,17 @@ class ShizukuManagerProvider : ShizukuProvider() {
         return super.onCreate()
     }
 
+    private fun isTrustedServerCaller(): Boolean {
+        // Read the kernel-provided caller identity before any binder handoff or IPC.
+        val uid = Binder.getCallingUid()
+        // The starter runs the server as root, system or shell (starter.cpp), so those three are accepted.
+        if (uid != 0 && uid != 1000 && uid != 2000) {
+            context?.let { ManagerActivityLog.log(it, "Service connection ignored: caller uid $uid is not root, system or shell") }
+            return false
+        }
+        return true
+    }
+
     override fun call(
         method: String,
         arg: String?,
@@ -30,16 +41,11 @@ class ShizukuManagerProvider : ShizukuProvider() {
         if (extras == null) return null
 
         if (method == METHOD_SEND_BINDER) {
-            // Read the kernel-provided caller identity before any binder handoff or IPC.
-            val uid = Binder.getCallingUid()
-            // The starter runs the server as root, system or shell (starter.cpp), so those three are accepted.
-            if (uid != 0 && uid != 1000 && uid != 2000) {
-                context?.let { ManagerActivityLog.log(it, "Service connection ignored: caller uid $uid is not root, system or shell") }
-                return null
-            }
+            if (!isTrustedServerCaller()) return null
         }
 
         return if (method == METHOD_SEND_USER_SERVICE) {
+            if (!isTrustedServerCaller()) return null
             try {
                 extras.classLoader = BinderContainer::class.java.classLoader
 

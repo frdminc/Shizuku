@@ -1,5 +1,6 @@
 package af.shizuku.manager.harness
 
+import af.shizuku.api.BinderContainer
 import af.shizuku.manager.ShizukuManagerProvider
 import af.shizuku.manager.adb.LoopbackAdbScan
 import af.shizuku.manager.adb.WirelessDebugging
@@ -218,6 +219,57 @@ class MdnsFallbackConnectionTest {
             val supplied = Binder()
             assertNotNull(provider.call("sendBinder", null, Bundle().apply { putBinder("binder", supplied) }))
             assertSame(supplied, rikka.shizuku.Shizuku.getBinder())
+        }
+    }
+
+    @Test fun `user service delivery rejects app uid before using supplied binder and logs once`() {
+        ActivityLogManager.initialize(world.app, ActivityLogSettingsImpl())
+        val provider = Robolectric.buildContentProvider(ShizukuManagerProvider::class.java).create().get()
+        var touched = false
+        val supplied =
+            object : Binder() {
+                override fun pingBinder(): Boolean {
+                    touched = true
+                    return true
+                }
+            }
+        world.serverUp()
+        ShadowBinder.setCallingUid(10_123)
+        val before = ActivityLogManager.logs.value.size
+        val extras =
+            Bundle().apply {
+                putParcelable("af.shizuku.plus.api.intent.extra.BINDER", BinderContainer(supplied))
+                putString(rikka.shizuku.ShizukuApiConstants.USER_SERVICE_ARG_TOKEN, "test-token")
+            }
+        assertNull(provider.call("sendUserService", null, extras))
+        assertFalse("unaccepted binder must never be queried", touched)
+        assertEquals(before + 1, ActivityLogManager.logs.value.size)
+        assertTrue(
+            ActivityLogManager.logs.value
+                .last()
+                .action
+                .contains("10123"),
+        )
+    }
+
+    @Test fun `user service delivery preserves shell, system and root handoff`() {
+        val provider = Robolectric.buildContentProvider(ShizukuManagerProvider::class.java).create().get()
+        for (uid in listOf(0, 1000, 2000)) {
+            world.serverUp()
+            ShadowBinder.setCallingUid(uid)
+            val supplied = Binder()
+            val extras =
+                Bundle().apply {
+                    putParcelable("af.shizuku.plus.api.intent.extra.BINDER", BinderContainer(supplied))
+                    putString(rikka.shizuku.ShizukuApiConstants.USER_SERVICE_ARG_TOKEN, "test-token")
+                }
+            val reply = provider.call("sendUserService", null, extras)
+            assertNotNull("expected reply for uid $uid", reply)
+            reply!!.classLoader = BinderContainer::class.java.classLoader
+            assertSame(
+                rikka.shizuku.Shizuku.getBinder(),
+                reply.getParcelable<BinderContainer>("af.shizuku.plus.api.intent.extra.BINDER")?.binder,
+            )
         }
     }
 }

@@ -44,6 +44,11 @@ the same rules. Jules has its own setup notes in [`JULES.md`](JULES.md).
   (bare `:manager:testDebugUnitTest` is ambiguous). JDK 21 is
   `/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home`; `/usr/libexec/java_home -v 21`
   returns JDK 27 on the build Mac, which fails. A fresh worktree needs `git submodule update --init api`.
+- **API demo** (a client that binds a user service): it is not in the root build. Building it from `api/`
+  with that directory's own `./gradlew` (Gradle 8.14; `./gradlew -p api` uses the root 9.7.1 wrapper and
+  fails) needed three local, uncommitted edits on 2026-10-12: `proguardFiles` without brackets in
+  `api/demo/build.gradle`, a `namespace` in `api/demo-hidden-api-stub/build.gradle`, and `:server-shared`
+  commented out in `api/settings.gradle`.
 - **Before a push:** `scripts/dev/lint.sh` (Spotless check plus lint; `--fix` applies the formatting).
   CI's first step is `:manager:spotlessCheck`, and the unit tests do not run it (2026-10-11: PR #39 failed CI on it).
 - **Entry activity:** `MainActivity` (NOT `HomeActivity` — that's abstract)
