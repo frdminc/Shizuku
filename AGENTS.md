@@ -44,6 +44,8 @@ the same rules. Jules has its own setup notes in [`JULES.md`](JULES.md).
   (bare `:manager:testDebugUnitTest` is ambiguous). JDK 21 is
   `/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home`; `/usr/libexec/java_home -v 21`
   returns JDK 27 on the build Mac, which fails. A fresh worktree needs `git submodule update --init api`.
+- **Before a push:** `scripts/dev/lint.sh` (Spotless check plus lint; `--fix` applies the formatting).
+  CI's first step is `:manager:spotlessCheck`, and the unit tests do not run it (2026-10-11: PR #39 failed CI on it).
 - **Entry activity:** `MainActivity` (NOT `HomeActivity` — that's abstract)
 - **Settings keys:** `manager/src/main/java/af/shizuku/manager/ShizukuSettings.java` inner class `Keys`
 - **Preference XML:** `manager/src/main/res/xml/settings_*.xml`
