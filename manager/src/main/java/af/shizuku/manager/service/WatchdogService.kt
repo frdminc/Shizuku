@@ -324,6 +324,7 @@ class WatchdogService : Service() {
         private const val MAX_COOLDOWN_MS = 300_000L // 5 min cap
         private val isRunning = AtomicBoolean(false)
         private val runningListeners = CopyOnWriteArrayList<(Boolean) -> Unit>()
+
         @Volatile private var currentLiveStatus: String? = null
 
         fun backoffMs(crashes: Int): Long =
@@ -352,7 +353,10 @@ class WatchdogService : Service() {
         }
 
         @JvmStatic
-        fun updateLiveStatus(context: Context, status: String?) {
+        fun updateLiveStatus(
+            context: Context,
+            status: String?,
+        ) {
             currentLiveStatus = status
             if (isRunning()) {
                 val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager

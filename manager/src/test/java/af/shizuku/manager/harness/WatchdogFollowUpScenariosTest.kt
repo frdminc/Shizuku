@@ -133,7 +133,12 @@ class WatchdogFollowUpScenariosTest {
         controller.create().start().resume()
         activityController = controller
         val fragment = BehaviorSettingsFragment()
-        controller.get().supportFragmentManager.beginTransaction().add(fragment, "behavior").commitNow()
+        controller
+            .get()
+            .supportFragmentManager
+            .beginTransaction()
+            .add(fragment, "behavior")
+            .commitNow()
         return controller.get() to fragment
     }
 
@@ -143,7 +148,10 @@ class WatchdogFollowUpScenariosTest {
     fun `setting-on-with-service-down-shows-switch-on-and-not-running-summary`() =
         scenario {
             // Setting is stored as ON, but the service is not running
-            world.prefs.edit().putBoolean(ShizukuSettings.Keys.KEY_WATCHDOG, true).commit()
+            world.prefs
+                .edit()
+                .putBoolean(ShizukuSettings.Keys.KEY_WATCHDOG, true)
+                .commit()
             assertFalse("service not running", WatchdogService.isRunning())
 
             val (_, fragment) = createBehaviorFragment()
@@ -161,7 +169,10 @@ class WatchdogFollowUpScenariosTest {
     fun `pending-default-with-service-down-shows-switch-on-and-not-running-summary`() =
         scenario {
             // New install with default pending (not yet stored in prefs, no server ran)
-            world.prefs.edit().putString(ShizukuSettings.Keys.KEY_WATCHDOG_DEFAULT, "pending").commit()
+            world.prefs
+                .edit()
+                .putString(ShizukuSettings.Keys.KEY_WATCHDOG_DEFAULT, "pending")
+                .commit()
             assertTrue("pending default", ShizukuSettings.isWatchdogDefaultPending())
             assertFalse("service not running", WatchdogService.isRunning())
 
@@ -179,7 +190,10 @@ class WatchdogFollowUpScenariosTest {
     @Test
     fun `setting-on-with-service-running-shows-switch-on-and-standard-summary`() =
         scenario {
-            world.prefs.edit().putBoolean(ShizukuSettings.Keys.KEY_WATCHDOG, true).commit()
+            world.prefs
+                .edit()
+                .putBoolean(ShizukuSettings.Keys.KEY_WATCHDOG, true)
+                .commit()
             watchdog = Robolectric.buildService(WatchdogService::class.java).create()
             assertTrue("service running", WatchdogService.isRunning())
 
@@ -197,7 +211,10 @@ class WatchdogFollowUpScenariosTest {
     @Test
     fun `setting-off-shows-switch-off-and-standard-summary`() =
         scenario {
-            world.prefs.edit().putBoolean(ShizukuSettings.Keys.KEY_WATCHDOG, false).commit()
+            world.prefs
+                .edit()
+                .putBoolean(ShizukuSettings.Keys.KEY_WATCHDOG, false)
+                .commit()
             assertFalse("service not running", WatchdogService.isRunning())
 
             val (_, fragment) = createBehaviorFragment()
@@ -214,7 +231,10 @@ class WatchdogFollowUpScenariosTest {
     @Test
     fun `service-lifecycle-dynamically-refreshes-switch-summary`() =
         scenario {
-            world.prefs.edit().putBoolean(ShizukuSettings.Keys.KEY_WATCHDOG, true).commit()
+            world.prefs
+                .edit()
+                .putBoolean(ShizukuSettings.Keys.KEY_WATCHDOG, true)
+                .commit()
             assertFalse("service initially not running", WatchdogService.isRunning())
 
             val (_, fragment) = createBehaviorFragment()
@@ -251,7 +271,8 @@ class WatchdogFollowUpScenariosTest {
     @Test
     fun `watchdog-and-live-activity-both-on-shows-only-watchdog-notification-carrying-live-text`() =
         scenario {
-            world.prefs.edit()
+            world.prefs
+                .edit()
                 .putBoolean(ShizukuSettings.Keys.KEY_WATCHDOG, true)
                 .putBoolean(ShizukuSettings.Keys.KEY_LIVE_ACTIVITY_ENABLED, true)
                 .commit()
@@ -313,7 +334,8 @@ class WatchdogFollowUpScenariosTest {
     @Test
     fun `switching-watchdog-off-clears-watchdog-and-live-notifications-and-stops-services`() =
         scenario {
-            world.prefs.edit()
+            world.prefs
+                .edit()
                 .putBoolean(ShizukuSettings.Keys.KEY_WATCHDOG, true)
                 .putBoolean(ShizukuSettings.Keys.KEY_LIVE_ACTIVITY_ENABLED, true)
                 .commit()
@@ -352,7 +374,10 @@ class WatchdogFollowUpScenariosTest {
 
             // The Watchdog is turned on next (its service starts; its onCreate asks the system to
             // stop the legacy live service, which has not landed yet — the window where both run).
-            world.prefs.edit().putBoolean(ShizukuSettings.Keys.KEY_WATCHDOG, true).commit()
+            world.prefs
+                .edit()
+                .putBoolean(ShizukuSettings.Keys.KEY_WATCHDOG, true)
+                .commit()
             watchdog = Robolectric.buildService(WatchdogService::class.java).create()
             world.settle()
 
@@ -385,7 +410,8 @@ class WatchdogFollowUpScenariosTest {
     @Test
     fun `live-service-start-with-watchdog-on-enters-foreground-before-stopping`() =
         scenario {
-            world.prefs.edit()
+            world.prefs
+                .edit()
                 .putBoolean(ShizukuSettings.Keys.KEY_WATCHDOG, true)
                 .putBoolean(ShizukuSettings.Keys.KEY_LIVE_ACTIVITY_ENABLED, true)
                 .commit()
@@ -453,7 +479,10 @@ class WatchdogFollowUpScenariosTest {
     fun `first-restart-with-server-recovering-suppresses-crash-heads-up-and-logs-recovery`() =
         scenario {
             serverStarted()
-            world.prefs.edit().putBoolean(ShizukuSettings.Keys.KEY_WATCHDOG, true).commit()
+            world.prefs
+                .edit()
+                .putBoolean(ShizukuSettings.Keys.KEY_WATCHDOG, true)
+                .commit()
             watchdog = Robolectric.buildService(WatchdogService::class.java).create()
             world.settle()
 
@@ -484,7 +513,10 @@ class WatchdogFollowUpScenariosTest {
     fun `first-restart-with-server-not-recovering-posts-crash-heads-up`() =
         scenario {
             serverStarted()
-            world.prefs.edit().putBoolean(ShizukuSettings.Keys.KEY_WATCHDOG, true).commit()
+            world.prefs
+                .edit()
+                .putBoolean(ShizukuSettings.Keys.KEY_WATCHDOG, true)
+                .commit()
             watchdog = Robolectric.buildService(WatchdogService::class.java).create()
             world.settle()
 
@@ -507,7 +539,10 @@ class WatchdogFollowUpScenariosTest {
     fun `repeated-restart-posts-crash-heads-up-immediately`() =
         scenario {
             serverStarted()
-            world.prefs.edit().putBoolean(ShizukuSettings.Keys.KEY_WATCHDOG, true).commit()
+            world.prefs
+                .edit()
+                .putBoolean(ShizukuSettings.Keys.KEY_WATCHDOG, true)
+                .commit()
             watchdog = Robolectric.buildService(WatchdogService::class.java).create()
             world.settle()
 
@@ -545,7 +580,10 @@ class WatchdogFollowUpScenariosTest {
     fun `second-crash-within-recovery-window-posts-one-heads-up-and-no-stale-recovery-line`() =
         scenario {
             serverStarted()
-            world.prefs.edit().putBoolean(ShizukuSettings.Keys.KEY_WATCHDOG, true).commit()
+            world.prefs
+                .edit()
+                .putBoolean(ShizukuSettings.Keys.KEY_WATCHDOG, true)
+                .commit()
             watchdog = Robolectric.buildService(WatchdogService::class.java).create()
             world.settle()
 
@@ -604,7 +642,10 @@ class WatchdogFollowUpScenariosTest {
     fun `withheld-restart-does-not-post-crash-heads-up`() =
         scenario {
             serverStarted()
-            world.prefs.edit().putBoolean(ShizukuSettings.Keys.KEY_WATCHDOG, true).commit()
+            world.prefs
+                .edit()
+                .putBoolean(ShizukuSettings.Keys.KEY_WATCHDOG, true)
+                .commit()
             watchdog = Robolectric.buildService(WatchdogService::class.java).create()
             world.settle()
 
