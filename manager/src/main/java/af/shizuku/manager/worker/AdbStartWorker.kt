@@ -39,9 +39,18 @@ class AdbStartWorker(
     context: Context,
     params: WorkerParameters,
 ) : CoroutineWorker(context, params) {
+    private var discoverySession: WirelessDebugging.Session? = null
+
     // Counted as start work for its whole run, so the tile never settles a start this worker is
     // still making (mDNS discovery, waiting for an unlock, the binder wait).
-    override suspend fun doWork(): Result = AdbAuthWait.starts.track { attemptStart() }
+    override suspend fun doWork(): Result =
+        AdbAuthWait.starts.track {
+            try {
+                attemptStart()
+            } finally {
+                discoverySession?.closeConnection()
+            }
+        }
 
     // The start path's decisions also go to HeadlessLogger: a release build logs nothing through
     // Timber, and HEADLESS_LOG is then the only way to see why a start keeps failing.
@@ -204,7 +213,7 @@ class AdbStartWorker(
                 .tag("AdbStartWorker")
                 .i("doWork: resolved port %d, starting ADB client", port)
             note("starting adb on port $port")
-            AdbStarter.startAdb(applicationContext, port)
+            AdbStarter.startAdb(applicationContext, port, connectedClient = discoverySession?.scannedClient)
             Starter.waitForBinder()
             ManagerActivityLog.log(applicationContext, "Service started via background ADB worker on port $port")
             WirelessDebugging.clearNoWifi(applicationContext)
@@ -376,7 +385,7 @@ class AdbStartWorker(
     private suspend fun tcpPortOpen(port: Int): Boolean = withContext(Dispatchers.IO) { AdbPortProber.isPortOpen(port, 600) }
 
     private suspend fun startOn(port: Int): Result {
-        AdbStarter.startAdb(applicationContext, port)
+        AdbStarter.startAdb(applicationContext, port, connectedClient = discoverySession?.scannedClient)
         Starter.waitForBinder()
         ManagerActivityLog.log(applicationContext, "Service started via background ADB worker on port $port")
         // This boot's network prompt stays: a later restore the same boot must not ask again.
@@ -415,7 +424,9 @@ class AdbStartWorker(
         }
         // The unlock notice stays while an unlock is what helps.
         WirelessDebugging.clearNoWifi(applicationContext, keepNotice = quiet || WirelessDebugging.silentRefusalPending(applicationContext))
-        return WirelessDebugging.Session(applicationContext, ::note, ::warn, ::promoteToForeground, restoresState, quiet, tcpPortOpen)
+        return WirelessDebugging
+            .Session(applicationContext, ::note, ::warn, ::promoteToForeground, restoresState, quiet, tcpPortOpen)
+            .also { discoverySession = it }
     }
 
     private var promoted = false

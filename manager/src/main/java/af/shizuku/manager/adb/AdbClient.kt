@@ -39,7 +39,19 @@ class AdbClient(
     /** Called once, right after the public key was offered to adbd and the connection starts
      *  waiting for the user to accept the "Allow USB debugging?" dialog. */
     private val onAuthorizationPending: (() -> Unit)? = null,
+    private val tlsOnly: Boolean = false,
+    private val connectTimeoutMs: Int = 5000,
 ) : Closeable {
+    private val socketLock = Any()
+    private var aborted = false
+
+    /** Deadline/cancellation closes the raw socket, including an in-progress TLS handshake. */
+    internal fun abort() =
+        synchronized(socketLock) {
+            aborted = true
+            runCatching { socket?.close() }
+        }
+
     @Volatile
     private var socket: Socket? = null
     private var plainInputStream: DataInputStream? = null
@@ -62,23 +74,29 @@ class AdbClient(
         require(port in 1..65535) { "port out of range: $port" }
         useTls = false // Reset TLS state for each connection attempt
         val s = Socket()
-        socket = s
+        synchronized(socketLock) {
+            if (aborted) {
+                s.close()
+                throw java.net.SocketException("ADB connection cancelled")
+            }
+            socket = s
+        }
         val address = InetSocketAddress(host, port)
 
         try {
-            s.connect(address, 5000)
+            s.connect(address, connectTimeoutMs)
             s.tcpNoDelay = true
             s.soTimeout = 15000 // 15 seconds read timeout to prevent infinite hangs
             s.keepAlive = true
 
-            val pin = DataInputStream(s.getInputStream())
-            plainInputStream = pin
+            plainInputStream = DataInputStream(s.getInputStream())
             val pout = DataOutputStream(s.getOutputStream())
             plainOutputStream = pout
 
             write(A_CNXN, A_VERSION, A_MAXDATA, "host::")
 
             var message = read()
+            if (tlsOnly && message.command != A_STLS) error("scan requires ADB TLS")
             if (message.command == A_STLS) {
                 if (!BuildUtils.atLeast29) {
                     error("Connect to adb with TLS is not supported before Android 9")
