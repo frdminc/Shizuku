@@ -11,7 +11,10 @@ cd "$(dirname "$0")/../.."
 
 fail=0
 while IFS=: read -r file line rest; do
-    name=$(sed -n "${line}p" "$file" | grep -oP '(?:setSmallIcon|\.addAction)\(\s*R\.drawable\.\K[A-Za-z0-9_]+')
+    # grep -E and sed rather than grep -P, which macOS's BSD grep does not have.
+    name=$(sed -n "${line}p" "$file" |
+        grep -oE '(setSmallIcon|\.addAction)\([[:space:]]*R\.drawable\.[A-Za-z0-9_]+' |
+        sed -E 's/.*R\.drawable\.//' | head -1 || true)
     [[ -z "$name" ]] && continue
     drawable=$(find . -path '*/res/drawable*' -iname "${name}.xml" | head -1)
     if [[ -z "$drawable" ]]; then
