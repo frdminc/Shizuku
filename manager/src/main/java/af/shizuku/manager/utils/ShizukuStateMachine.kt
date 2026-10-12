@@ -87,6 +87,7 @@ object ShizukuStateMachine {
         postRunningLatchForTesting = null
         exemptionCheckRunning.set(false)
         BatteryOptimizationGuard.resetForTesting()
+        VendorBatteryRestrictions.resetForTesting()
     }
 
     private fun loadPersistedSettledState(): State =
@@ -210,6 +211,17 @@ object ShizukuStateMachine {
                                         Timber.tag("ShizukuStateMachine").e(e, "Failed to check the battery exemption for the new-install Watchdog")
                                     } finally {
                                         exemptionCheckRunning.set(false)
+                                    }
+                                }
+                                if (ShizukuSettings.getWatchdog()) {
+                                    try {
+                                        // Vendor battery restrictions (Samsung, Xiaomi) are re-applied by the
+                                        // vendor at any time, so unlike the one-shot #36 exemption check above this
+                                        // runs at every start while the Watchdog is on. The shell work stays on this
+                                        // IO dispatcher; the system-service reads inside switch to Main.
+                                        VendorBatteryRestrictions.check(context)
+                                    } catch (e: Exception) {
+                                        Timber.tag("ShizukuStateMachine").e(e, "Failed to check vendor battery restrictions")
                                     }
                                 }
                             } catch (e: Exception) {

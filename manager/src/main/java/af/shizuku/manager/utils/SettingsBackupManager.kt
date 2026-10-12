@@ -29,6 +29,7 @@ object SettingsBackupManager {
             ShizukuSettings.Keys.KEY_SYNCED_START_ON_BOOT_DEFAULT,
             ShizukuSettings.Keys.KEY_WATCHDOG_DEFAULT,
             ShizukuSettings.Keys.KEY_WATCHDOG_EXEMPTION_PENDING,
+            ShizukuSettings.Keys.KEY_WATCHDOG_VENDOR_BATTERY_REPORTED,
             // Ephemeral runtime state
             ShizukuSettings.Keys.KEY_SENTRY_LIMIT_REACHED,
             ShizukuSettings.Keys.KEY_SERVER_STARTED_BUILD,

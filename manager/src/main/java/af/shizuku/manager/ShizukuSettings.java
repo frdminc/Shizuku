@@ -36,6 +36,7 @@ public class ShizukuSettings {
         public static final String KEY_WATCHDOG = "watchdog";
         public static final String KEY_WATCHDOG_DEFAULT = "watchdog_default";
         public static final String KEY_WATCHDOG_EXEMPTION_PENDING = "watchdog_exemption_pending";
+        public static final String KEY_WATCHDOG_VENDOR_BATTERY_REPORTED = "watchdog_vendor_battery_reported";
         public static final String KEY_TCP_MODE = "tcp_mode";
         public static final String KEY_TCP_PORT = "tcp_port";
         public static final String KEY_LAST_PORT = "last_adb_port";
