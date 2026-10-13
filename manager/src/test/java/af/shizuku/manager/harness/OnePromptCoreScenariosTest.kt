@@ -166,6 +166,41 @@ class OnePromptCoreScenariosTest {
         assertTrue("isUnanswered() with unreadable storage (fail-open guards let starts through)", AdbAuthWait.isUnanswered())
     }
 
+    // A command whose output never ends is cut off at the output bound, not read until memory runs out.
+    @Test
+    fun `endless command output is cut off at the output bound`() {
+        FakeAdbd(authorized = true, endlessOutput = ByteArray(64 * 1024)).use { flood ->
+            var seen = 0L
+            val failure =
+                runCatching {
+                    AdbClient("127.0.0.1", flood.port, key, allowLegacyAuth = { true }).use {
+                        it.connect()
+                        it.command("shell:x", maxOutputBytes = 256 * 1024) { chunk -> seen += chunk.size }
+                    }
+                }.exceptionOrNull()
+            assertTrue("$failure", failure is af.shizuku.manager.adb.AdbCommandLimitException)
+            assertTrue("read $seen bytes", seen <= 256 * 1024)
+        }
+    }
+
+    // A command that trickles output forever ends at the overall deadline, although no single read times out.
+    @Test
+    fun `trickling command output ends at the deadline`() {
+        FakeAdbd(authorized = true, endlessOutput = ByteArray(1), outputGapMs = 50).use { trickle ->
+            val started = System.nanoTime()
+            val failure =
+                runCatching {
+                    AdbClient("127.0.0.1", trickle.port, key, allowLegacyAuth = { true }).use {
+                        it.connect()
+                        it.command("shell:x", deadlineMs = 500) { }
+                    }
+                }.exceptionOrNull()
+            val tookMs = (System.nanoTime() - started) / 1_000_000
+            assertTrue("$failure", failure is af.shizuku.manager.adb.AdbCommandLimitException)
+            assertTrue("took $tookMs ms", tookMs < 5_000)
+        }
+    }
+
     private companion object {
         const val MARKER = "adb_auth_unanswered_at"
 

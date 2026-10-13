@@ -35,6 +35,10 @@ private const val MAX_PAYLOAD = 1024 * 1024
 /** adbd's legacy auth token length (TOKEN_SIZE in adb's protocol). */
 private const val ADB_TOKEN_SIZE = 20
 
+/** Bounds on one [AdbClient.command]: the starter and the commands around it print a few KiB and finish in seconds. */
+internal const val COMMAND_MAX_OUTPUT_BYTES = 256 * 1024
+internal const val COMMAND_DEADLINE_MS = 120_000L
+
 class AdbClient(
     private val host: String,
     private val port: Int,
@@ -278,11 +282,32 @@ class AdbClient(
         }
     }
 
+    /**
+     * Runs [cmd] and streams its output to [listener]. The read timeout bounds each read, not the
+     * command, so the command as a whole is bounded too: at most [maxOutputBytes] of output and
+     * [deadlineMs] from the start, checked as each message arrives (so up to one read timeout
+     * later). Past either bound the connection is closed and an [AdbCommandLimitException] thrown.
+     */
     fun command(
         cmd: String,
+        maxOutputBytes: Int = COMMAND_MAX_OUTPUT_BYTES,
+        deadlineMs: Long = COMMAND_DEADLINE_MS,
         listener: ((ByteArray) -> Unit)? = null,
     ) {
         val localId = 1
+        val startedAt = System.nanoTime()
+        var outputBytes = 0L
+
+        fun checkBounds() {
+            val reason =
+                when {
+                    outputBytes > maxOutputBytes -> "more than $maxOutputBytes bytes of output"
+                    System.nanoTime() - startedAt > deadlineMs * 1_000_000L -> "still running after ${deadlineMs / 1000} s"
+                    else -> return
+                }
+            close()
+            throw AdbCommandLimitException("${cmd.substringBefore(':')} command stopped: $reason")
+        }
         write(A_OPEN, localId, 0, cmd)
 
         var message = read()
@@ -290,8 +315,11 @@ class AdbClient(
             A_OKAY -> {
                 while (true) {
                     message = read()
+                    checkBounds()
                     val remoteId = message.arg0
                     if (message.command == A_WRTE) {
+                        outputBytes += message.data?.size ?: 0
+                        checkBounds()
                         message.data?.let { listener?.invoke(it) }
                         write(A_OKAY, localId, remoteId)
                     } else if (message.command == A_CLSE) {
@@ -410,3 +438,8 @@ class AdbClient(
 class AdbTlsRequiredException(
     message: String,
 ) : IllegalStateException(message)
+
+/** A command ran past its output or time bound; the connection was closed. */
+class AdbCommandLimitException(
+    message: String,
+) : java.io.IOException(message)

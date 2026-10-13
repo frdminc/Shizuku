@@ -11,6 +11,7 @@ import af.shizuku.manager.adb.AdbProtocol.A_MAXDATA
 import af.shizuku.manager.adb.AdbProtocol.A_OKAY
 import af.shizuku.manager.adb.AdbProtocol.A_OPEN
 import af.shizuku.manager.adb.AdbProtocol.A_VERSION
+import af.shizuku.manager.adb.AdbProtocol.A_WRTE
 import java.io.Closeable
 import java.io.DataInputStream
 import java.io.EOFException
@@ -51,6 +52,10 @@ class FakeAdbd(
     private val onTcpip: (Int) -> Unit = {},
     private val tls: Boolean = false,
     private val silentHello: Boolean = false,
+    // Answers every A_OPEN with this chunk as output, again and again every [outputGapMs], until the
+    // client hangs up: a command that never ends.
+    private val endlessOutput: ByteArray? = null,
+    private val outputGapMs: Long = 0,
 ) : Closeable {
     enum class Answer { ACCEPT, REJECT, SILENT }
 
@@ -195,6 +200,12 @@ class FakeAdbd(
                 if (command.startsWith("shell:")) onShell(command)
                 if (command.startsWith("tcpip:")) onTcpip(command.removePrefix("tcpip:").toIntOrNull() ?: 0)
                 write(output, AdbMessage(A_OKAY, REMOTE_ID, message.arg0, ByteArray(0)))
+                if (endlessOutput != null) {
+                    while (true) {
+                        write(output, AdbMessage(A_WRTE, REMOTE_ID, message.arg0, endlessOutput))
+                        if (outputGapMs > 0) Thread.sleep(outputGapMs)
+                    }
+                }
                 write(output, AdbMessage(A_CLSE, REMOTE_ID, message.arg0, ByteArray(0)))
             }
         } catch (_: IOException) {
