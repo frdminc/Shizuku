@@ -163,6 +163,7 @@ class PinnedAdbServerTrustManager(
     private val expectedPin: String? = null,
     private val log: ((String) -> Unit)? = null,
     private val requireRecordedPin: Boolean = false,
+    private val requiredPin: String? = null,
 ) : X509ExtendedTrustManager() {
     private val observed = pins.snapshot()
     private var seen: String? = null
@@ -176,7 +177,8 @@ class PinnedAdbServerTrustManager(
         val leaf = chain?.firstOrNull() ?: throw CertificateException("adbd presented no certificate")
         val pin = AdbServerPin.of(leaf)
         seen = pin
-        if ((expectedPin != null && pin != expectedPin) ||
+        if ((requiredPin != null && pin != requiredPin) ||
+            (expectedPin != null && pin != expectedPin) ||
             (observed.pin != null && observed.pin != pin && pin != expectedPin)
         ) {
             mismatchSeen = true

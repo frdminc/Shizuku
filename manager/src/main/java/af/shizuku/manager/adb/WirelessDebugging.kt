@@ -31,6 +31,7 @@ import androidx.work.ExistingWorkPolicy
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.workDataOf
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -1061,28 +1062,29 @@ object WirelessDebugging {
          * pin, so it is safe to use while still searching for the real adbd. Transport errors are
          * rethrown so the caller can retry the same port later instead of treating it as a refusal.
          */
-        private suspend fun verifyPort(port: Int): Boolean {
-            val prefs = ShizukuSettings.getPreferences() ?: return false
-            val key = runCatching { AdbKey(PreferenceAdbKeyStore(prefs), "shizuku+") }.getOrNull() ?: return false
-            return try {
-                AdbClient("127.0.0.1", port, key, connectTimeoutMs = 2000, commitFirstUse = false, expectedPin = requiredPin).use {
-                    it.connect()
-                    it.seenPin != null && it.seenPin == (requiredPin ?: AdbServerPin.store().connectPin)
+        private suspend fun verifyPort(
+            port: Int,
+            expected: String?,
+        ): Boolean {
+            val prefs = ShizukuSettings.getPreferences() ?: error("ADB preferences unavailable")
+            val key = AdbKey(PreferenceAdbKeyStore(prefs), "shizuku+")
+            return AdbClient(
+                "127.0.0.1",
+                port,
+                key,
+                connectTimeoutMs = 2000,
+                readTimeoutMs = 2000,
+                commitFirstUse = false,
+                requiredPin = expected,
+            ).use { client ->
+                try {
+                    client.connect()
+                    client.seenPin != null && client.seenPin == expected
+                } catch (e: Exception) {
+                    if (e is CancellationException) throw e
+                    val seen = client.seenPin
+                    if (seen != null && expected != null && seen != expected) false else throw e
                 }
-            } catch (e: AdbServerCertChangedException) {
-                false
-            } catch (e: java.net.ConnectException) {
-                throw e
-            } catch (e: java.net.SocketTimeoutException) {
-                throw e
-            } catch (e: java.net.SocketException) {
-                throw e
-            } catch (e: javax.net.ssl.SSLException) {
-                // Handshake failures from a closed or reset socket are transient; a real mismatch
-                // is already raised as AdbServerCertChangedException.
-                throw e
-            } catch (_: Exception) {
-                false
             }
         }
 
@@ -1257,7 +1259,9 @@ object WirelessDebugging {
                 discovery.start(context) { p ->
                     synchronized(winnerLock) {
                         if (accepting && p in 1..65535) {
-                            if (found.size >= MAX_PENDING_PORTS) found.poll()
+                            if (found.count { !it.second } >= MAX_PENDING_PORTS) {
+                                found.firstOrNull { !it.second }?.let { found.remove(it) }
+                            }
                             found.add(p to false)
                         }
                     }
@@ -1284,7 +1288,7 @@ object WirelessDebugging {
                         val currentPin = requiredPin ?: AdbServerPin.store().connectPin
                         val refused =
                             try {
-                                (!fromScan && (currentPin != null || changedCertSeen) && !verifyPort(port)) ||
+                                (!fromScan && (currentPin != null || changedCertSeen) && !verifyPort(port, currentPin)) ||
                                     (fromScan && changedCertSeen && (currentPin == null || scannedClient?.seenPin != currentPin))
                             } catch (e: java.net.ConnectException) {
                                 note("port $port is not accepting yet; keeping it for retry")
@@ -1297,6 +1301,11 @@ object WirelessDebugging {
                                 continue
                             } catch (e: javax.net.ssl.SSLException) {
                                 note("port $port handshake failed; keeping it for retry")
+                                continue
+                            } catch (e: Exception) {
+                                if (e is CancellationException) throw e
+                                checkedPorts.add(port)
+                                note("port $port probe did not complete; continuing discovery")
                                 continue
                             }
                         if (refused) {

@@ -101,6 +101,8 @@ object AdbStarter {
         userGesture: Boolean = false,
         /** The exact SPKI approved by the user's confirmation. */
         confirmedPin: String? = null,
+        /** The recorded key required by discovery, without approval to replace another key. */
+        requiredPin: String? = null,
     ) {
         HeadlessLogger.init(context)
         if (port !in 1..65535) {
@@ -165,13 +167,18 @@ object AdbStarter {
                 var activePort = port
                 var retained = connectedClient
                 var retryPin = confirmedPin.takeIf { userGesture }
+                // The requirement covers the discovered connection; tcpip then starts a new adbd key.
+                var discoveryPin = requiredPin
 
                 fun nextClient(): AdbClient {
                     val connected = retained
                     retained = null
+                    val required = discoveryPin
+                    discoveryPin = null
                     if (connected != null) {
-                        val pin = AdbServerPin.store().connectPin
-                        if (pin == null || connected.seenPin != pin) {
+                        val recorded = AdbServerPin.store().connectPin
+                        val pin = required ?: recorded
+                        if (pin == null || connected.seenPin != pin || (recorded != null && connected.seenPin != recorded)) {
                             val seen = connected.seenPin
                             connected.close()
                             if (pin == null) {
@@ -190,10 +197,11 @@ object AdbStarter {
                             p,
                             key,
                             onPending,
-                            allowLegacyAuth = { isLegacyAuthPort(p) },
+                            allowLegacyAuth = { required == null && isLegacyAuthPort(p) },
                             pinChangeLog = log,
                             expectedPin = expected,
-                            requireRecordedPin = activePort == AdbServerPin.pendingPort,
+                            requireRecordedPin = activePort == AdbServerPin.pendingPortForCurrentBoot(),
+                            requiredPin = required,
                         )
                     }
                 }
@@ -284,6 +292,7 @@ object AdbStarter {
             throw e
         } finally {
             AdbAuthWait.starts.end()
+            // Leave wireless debugging on after a key refusal so the confirmation tap can reach adbd.
             if (!stoodDown && !pinRefused && ShizukuSettings.getAutoDisableUsbDebugging() && context.checkSelfPermission(WRITE_SECURE_SETTINGS) == PackageManager.PERMISSION_GRANTED) {
                 AdbServerPin.putSetting(context, "adb_wifi_enabled", 0)
                 HeadlessLogger.i(LOG, "auto-disable: turned wireless debugging off")

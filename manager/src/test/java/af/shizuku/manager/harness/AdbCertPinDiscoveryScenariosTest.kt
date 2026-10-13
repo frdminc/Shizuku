@@ -362,4 +362,169 @@ class AdbCertPinDiscoveryScenariosTest {
         }
         assertNull(AdbServerPin.store().connectPin)
     }
+
+    @Test fun `scan hit survives twenty mDNS announcements during scan`() {
+        pin(world.wirelessAdbd)
+        setScanDiscovery(world.wirelessAdbd)
+        val scan = WirelessDebugging.discovery
+        lateinit var announce: (Int) -> Unit
+        WirelessDebugging.discovery =
+            object : WirelessDebugging.PortDiscovery {
+                override fun start(
+                    context: Context,
+                    onPort: (Int) -> Unit,
+                ): () -> Unit {
+                    announce = onPort
+                    return {}
+                }
+
+                override fun scan(
+                    context: Context,
+                    onResult: (WirelessDebugging.ScanResult) -> Unit,
+                ): (() -> Unit)? =
+                    scan.scan(context) { result ->
+                        onResult(result)
+                        repeat(20) { announce(world.closedTcpPort) }
+                    }
+            }
+        WirelessDebugging.discoveryMs = 50
+        runBlocking {
+            val session = WirelessDebugging.Session(world.app, {}, {}, { false })
+            try {
+                assertEquals(world.wirelessAdbd.port, session.findPort())
+                assertNotNull(session.scannedClient)
+            } finally {
+                session.closeConnection()
+            }
+        }
+    }
+
+    @Test fun `legacy probe reply does not report a changed key`() {
+        pin(world.wirelessAdbd)
+        FakeAdbd(authorized = true).use { listener ->
+            WirelessDebugging.discovery =
+                WirelessDebugging.PortDiscovery { _, onPort ->
+                    onPort(listener.port)
+                    onPort(world.wirelessAdbd.port)
+                    ({})
+                }
+            val notes = mutableListOf<String>()
+            runBlocking {
+                val session = WirelessDebugging.Session(world.app, notes::add, notes::add, { false })
+                assertEquals(world.wirelessAdbd.port, session.findPort())
+            }
+            assertTrue(notes.toString(), notes.any { it.contains("did not complete") })
+            assertFalse(notes.toString(), notes.any { it.contains("did not match the recorded adbd key") })
+            assertEquals(0, listener.signatures)
+        }
+    }
+
+    @Test fun `matching key with missing TLS hello does not report a changed key`() {
+        FakeAdbd(tls = true, fixedCertificate = true, omitTlsCnxn = true).use { listener ->
+            val key = AdbKey(PreferenceAdbKeyStore(world.prefs), "shizuku+")
+            runCatching { AdbClient("127.0.0.1", listener.port, key, commitFirstUse = false).use { it.connect() } }
+            val pins = AdbServerPin.store()
+            pins.commit(AdbServerPin.of(listener.certificates.first()), pins.snapshot())
+            WirelessDebugging.discovery =
+                WirelessDebugging.PortDiscovery { _, onPort ->
+                    onPort(listener.port)
+                    ({})
+                }
+            WirelessDebugging.discoveryMs = 100
+            val notes = mutableListOf<String>()
+            assertThrows(java.util.concurrent.TimeoutException::class.java) {
+                runBlocking { WirelessDebugging.Session(world.app, notes::add, notes::add, { false }).findPort() }
+            }
+            assertFalse(notes.toString(), notes.any { it.contains("did not match the recorded adbd key") })
+        }
+    }
+
+    @Test fun `silent probe returns within three seconds`() {
+        pin(world.wirelessAdbd)
+        FakeAdbd(silentHello = true).use { listener ->
+            WirelessDebugging.discovery =
+                WirelessDebugging.PortDiscovery { _, onPort ->
+                    onPort(listener.port)
+                    onPort(world.wirelessAdbd.port)
+                    ({})
+                }
+            WirelessDebugging.discoveryMs = 5_000
+            val started = System.nanoTime()
+            runBlocking {
+                assertEquals(world.wirelessAdbd.port, WirelessDebugging.Session(world.app, {}, {}, { false }).findPort())
+            }
+            val elapsed = (System.nanoTime() - started) / 1_000_000
+            assertEquals(1, listener.connections)
+            assertTrue("probe took $elapsed ms", elapsed < 3_000)
+            world.waitUntil({ "silent probe connection closes" }) { listener.activeConnections == 0 }
+        }
+    }
+
+    @Test fun `worker recovery keeps required key when store clears after discovery`() {
+        pin(world.wirelessAdbd)
+        world.serverDown()
+        af.shizuku.manager.utils.ShizukuStateMachine
+            .update()
+        FakeAdbd(tls = true).use { saved ->
+            world.prefs
+                .edit()
+                .putInt("last_adb_port", saved.port)
+                .commit()
+            var replacement: FakeAdbd? = null
+            WirelessDebugging.discovery =
+                WirelessDebugging.PortDiscovery { _, onPort ->
+                    onPort(world.wirelessAdbd.port)
+                    val stop: () -> Unit = {
+                        val port = world.wirelessAdbd.port
+                        world.wirelessAdbd.close()
+                        AdbServerPin.store().clear()
+                        replacement = FakeAdbd(port = port, tls = true, fixedCertificate = true)
+                    }
+                    stop
+                }
+            try {
+                world.scenario {
+                    backgroundStart()
+                    awaitStartWork()
+                    assertEquals(androidx.work.WorkInfo.State.FAILED, lastWork)
+                    assertTrue(log(), log().contains("starting adb on discovered port"))
+                }
+                assertNotNull(replacement)
+                assertEquals(0, replacement!!.clientCertificates.get())
+                assertNull(AdbServerPin.store().connectPin)
+            } finally {
+                replacement?.close()
+            }
+        }
+    }
+
+    @Test fun `stale pending hint does not require a key on a new boot`() {
+        AdbServerPin.pendingPort = world.wirelessAdbd.port
+        android.provider.Settings.Global
+            .putInt(world.app.contentResolver, android.provider.Settings.Global.BOOT_COUNT, 2)
+        pin(world.wirelessAdbd)
+        assertEquals(AdbServerPin.of(world.wirelessAdbd.certificates.first()), AdbServerPin.store().connectPin)
+    }
+
+    @Test fun `background key refusal leaves wireless debugging on for confirmation`() {
+        pin(world.wirelessAdbd)
+        world.prefs
+            .edit()
+            .putBoolean("auto_disable_usb_debugging", true)
+            .commit()
+        android.provider.Settings.Global
+            .putInt(world.app.contentResolver, "adb_wifi_enabled", 1)
+        FakeAdbd(tls = true).use { listener ->
+            assertThrows(AdbServerCertChangedException::class.java) {
+                runBlocking { AdbStarter.startAdb(world.app, listener.port) }
+            }
+        }
+        assertEquals(
+            1,
+            android.provider.Settings.Global
+                .getInt(world.app.contentResolver, "adb_wifi_enabled"),
+        )
+        assertTrue(world.app.getString(af.shizuku.manager.R.string.adb_pin_changed_notice).contains("left on"))
+        assertTrue(world.app.getString(af.shizuku.manager.R.string.adb_pin_missing_notice).contains("left on"))
+    }
 }

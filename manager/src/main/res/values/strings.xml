@@ -1676,6 +1676,6 @@
     <string name="app_management_item_state_unresolved">Permission state unavailable, tap to retry</string>
     <string name="adb_first_cert_title">Record wireless debugging key?</string>
     <string name="adb_first_cert_message">No wireless debugging key is recorded for this boot yet. Record the key shown by this connection and start?\n\nNew key: %1$s</string>
-    <string name="adb_pin_missing_notice">No key recorded for this boot yet. Open the app and tap Start to confirm the key.</string>
-    <string name="adb_pin_changed_notice">Wireless debugging’s key changed. Open the app and tap Start to confirm it.</string>
+    <string name="adb_pin_missing_notice">No key recorded for this boot yet. Wireless debugging was left on so you can open the app and tap Start to confirm the key.</string>
+    <string name="adb_pin_changed_notice">Wireless debugging’s key changed. Wireless debugging was left on so you can open the app and tap Start to confirm it.</string>
 </resources>

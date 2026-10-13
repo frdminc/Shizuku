@@ -229,18 +229,20 @@ class AdbStartWorker(
                 // key will still match.
                 if (tcpPort > 0 && isWifiOk || savedPort > 0 && isWifiOk && runAttemptCount == 0) {
                     note("port $port presented a changed adbd key; continuing to discovery")
+                    val requiredPin =
+                        af.shizuku.manager.adb.AdbServerPin
+                            .store()
+                            .connectPin
+                            ?: throw af.shizuku.manager.adb
+                                .AdbServerPinMissingException()
                     discoverySession?.restore()
                     val discoveredPort =
                         wirelessSession()
                             .also {
-                                it.requireMatchingPin(
-                                    af.shizuku.manager.adb.AdbServerPin
-                                        .store()
-                                        .connectPin,
-                                )
+                                it.requireMatchingPin(requiredPin)
                             }.findPort()
                     note("starting adb on discovered port $discoveredPort")
-                    AdbStarter.startAdb(applicationContext, discoveredPort, connectedClient = discoverySession?.scannedClient)
+                    AdbStarter.startAdb(applicationContext, discoveredPort, connectedClient = discoverySession?.scannedClient, requiredPin = requiredPin)
                 } else {
                     throw e
                 }

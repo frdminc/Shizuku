@@ -64,6 +64,9 @@ class AdbClient(
      * to false so the brute-force scan cannot take the first-use pin.
      */
     private val commitFirstUse: Boolean = true,
+    private val readTimeoutMs: Int = 15000,
+    /** A discovery result must still present this key when the start connects. */
+    private val requiredPin: String? = null,
 ) : Closeable {
     private val socketLock = Any()
     private var aborted = false
@@ -113,7 +116,7 @@ class AdbClient(
         try {
             s.connect(address, connectTimeoutMs)
             s.tcpNoDelay = true
-            s.soTimeout = 15000 // 15 seconds read timeout to prevent infinite hangs
+            s.soTimeout = readTimeoutMs
             s.keepAlive = true
 
             plainInputStream = DataInputStream(s.getInputStream())
@@ -132,11 +135,12 @@ class AdbClient(
                 }
                 write(A_STLS, A_STLS_VERSION, 0)
 
-                val trust = PinnedAdbServerTrustManager(pinStore, expectedPin, pinChangeLog, requireRecordedPin)
+                val trust = PinnedAdbServerTrustManager(pinStore, expectedPin, pinChangeLog, requireRecordedPin, requiredPin)
                 pinTrust = trust
                 val sslContext = key.sslContext(trust)
                 val ts = sslContext.socketFactory.createSocket(s, host, port, true) as SSLSocket
                 tlsSocket = ts
+                ts.soTimeout = readTimeoutMs
                 ts.startHandshake()
                 Timber.tag(TAG).d("Handshake succeeded.")
 

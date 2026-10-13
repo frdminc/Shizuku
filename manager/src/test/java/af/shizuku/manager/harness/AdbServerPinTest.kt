@@ -179,6 +179,27 @@ class AdbServerPinTest {
         assertNull(pins.connectPin)
     }
 
+    @Test fun requiredKeyRemainsRequiredAfterStoreClears() {
+        trust().commitFirstUse()
+        val required = AdbServerPin.of(first)
+        pins.clear()
+        val refused = PinnedAdbServerTrustManager(pins, requiredPin = required)
+        assertThrows(CertificateException::class.java) { refused.checkServerTrusted(arrayOf(other), "RSA") }
+        assertTrue(refused.mismatchSeen)
+        assertNull(pins.connectPin)
+        val matching = PinnedAdbServerTrustManager(pins, requiredPin = required)
+        matching.checkServerTrusted(arrayOf(first), "RSA")
+        matching.commitFirstUse()
+        assertEquals(required, pins.connectPin)
+    }
+
+    @Test fun requiredKeyDoesNotApproveReplacingAnotherRecordedKey() {
+        trust(other).commitFirstUse()
+        val required = PinnedAdbServerTrustManager(pins, requiredPin = AdbServerPin.of(first))
+        assertThrows(CertificateException::class.java) { required.checkServerTrusted(arrayOf(first), "RSA") }
+        assertEquals(AdbServerPin.of(other), pins.connectPin)
+    }
+
     companion object {
         private val pair by lazy { KeyPairGenerator.getInstance("RSA").apply { initialize(2048) }.generateKeyPair() }
 
