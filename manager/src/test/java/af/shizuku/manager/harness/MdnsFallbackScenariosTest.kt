@@ -145,14 +145,50 @@ class MdnsFallbackScenariosTest {
                         .PreferenceAdbKeyStore(world.prefs),
                     "test",
                 )
-        af.shizuku.manager.adb.AdbClient("127.0.0.1", world.adbd.port, key, tlsOnly = true).use {
+        af.shizuku.manager.adb.AdbClient("127.0.0.1", world.adbd.port, key).use {
             try {
                 it.connect()
                 fail("legacy AUTH accepted")
-            } catch (_: IllegalStateException) {
+            } catch (_: af.shizuku.manager.adb.AdbTlsRequiredException) {
             }
         }
         assertEquals(0, world.adbd.offers)
+        assertEquals(0, world.adbd.signatures)
+    }
+
+    // A listener on an announced port that answers the hello with the legacy token challenge
+    // instead of TLS is not the paired adbd: the start fails at once, answers nothing, offers no
+    // key, and does not retry.
+    @Test fun `announced port asking for a token signature gets none`() {
+        FakeAdbd(authorized = true).use { peer ->
+            val failure =
+                runBlocking {
+                    runCatching {
+                        af.shizuku.manager.adb.AdbStarter
+                            .startAdb(world.app, peer.port, log = {})
+                    }
+                }.exceptionOrNull()
+            assertTrue("$failure", failure is af.shizuku.manager.adb.AdbTlsRequiredException)
+            assertEquals(1, peer.connections)
+            assertEquals(0, peer.signatures)
+            assertEquals(0, peer.offers)
+        }
+    }
+
+    // The production rule: the token challenge is answered only on the TCP port adbd reports
+    // (service.adb.tcp.port), and not when service.adb.listen_addrs puts adbd somewhere else.
+    @Test fun `legacy auth only on the TCP port adbd reports`() {
+        val real = af.shizuku.manager.adb.AdbStarter.realIsLegacyAuthPort
+        assertFalse(real(5555))
+        world.adbdReportsTcpPort(5555)
+        assertTrue(real(5555))
+        assertFalse(real(37123))
+        org.robolectric.shadows.ShadowSystemProperties
+            .override("service.adb.listen_addrs", "tcp:5556")
+        assertFalse(real(5555))
+        org.robolectric.shadows.ShadowSystemProperties
+            .override("service.adb.listen_addrs", "tcp:5556,tcp:5555")
+        assertTrue(real(5555))
     }
 
     @Test fun `kernel range parser validates or uses kernel default`() {

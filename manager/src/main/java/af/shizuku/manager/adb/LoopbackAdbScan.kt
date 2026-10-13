@@ -71,7 +71,7 @@ internal object LoopbackAdbScan {
                             val port = next.getAndIncrement()
                             if (port > range.last) break
                             if (port in excluded) continue
-                            val client = AdbClient("127.0.0.1", port, key, tlsOnly = true, connectTimeoutMs = CONNECT_MS)
+                            val client = AdbClient("127.0.0.1", port, key, connectTimeoutMs = CONNECT_MS)
                             synchronized(lock) {
                                 if (stopped) return@scanWorker
                                 pending += client

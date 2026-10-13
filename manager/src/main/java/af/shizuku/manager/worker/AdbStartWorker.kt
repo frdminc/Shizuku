@@ -138,7 +138,11 @@ class AdbStartWorker(
                 if (desiredPort in 1..65535) {
                     val open = tcpPortOpen(desiredPort)
                     note("tcp fast path: port $desiredPort ${if (open) "open" else "closed"}")
-                    if (open) return startThroughTcp(desiredPort)
+                    // Only adbd's own reported port is dialled with the legacy challenge (see
+                    // AdbStarter.isLegacyAuthPort); a listener there that adbd does not report is
+                    // something else, so open the port again through wireless debugging instead.
+                    if (open && AdbStarter.isLegacyAuthPort(desiredPort)) return startThroughTcp(desiredPort)
+                    if (open) note("tcp port $desiredPort is open but adbd does not report it as its tcp port; not using it")
                     // adbd still says it listens there (service.adb.tcp.port): closed only for a
                     // moment while adbd restarts (t2e, 2026-10-06: the end of a fleet deploy), which
                     // is no reason to wait for Wi-Fi and turn wireless debugging on. The property
@@ -185,7 +189,10 @@ class AdbStartWorker(
                 val probePort = ShizukuSettings.getTcpPort().takeIf { it in 1..65535 } ?: 5555
                 val open = AdbPortProber.isPortOpen(probePort, 400)
                 note("force_start_wadb probe: port $probePort ${if (open) "open" else "closed"}")
-                if (open) {
+                // Only a port adbd reports as its own is started through (see AdbStarter.isLegacyAuthPort).
+                // This block runs only when adbd reports no TCP port, so in practice it now falls through
+                // to mDNS rather than fail on the same unreported port every attempt.
+                if (open && AdbStarter.isLegacyAuthPort(probePort)) {
                     AdbStarter.startAdb(applicationContext, probePort)
                     Starter.waitForBinder()
                     ManagerActivityLog.log(

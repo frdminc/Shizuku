@@ -97,6 +97,26 @@ class TcpRestoreScenariosTest {
             }
         }
 
+    // Something other than adbd listens on the TCP-mode port (adbd does not report it in
+    // service.adb.tcp.port) and answers with the legacy token challenge. The fast path must not
+    // dial it: no token is signed and no key offered, and the start goes on to the restore.
+    @Test
+    fun `tcp-port-held-by-a-listener-adbd-does-not-report-is-not-dialled`() =
+        scenario {
+            af.shizuku.manager.adb.AdbStarter.isLegacyAuthPort = { it == world.adbd.port || it == world.tcpAdbd?.port }
+            val notUsed = "tcp port $tcpPort is open but adbd does not report it as its tcp port; not using it"
+            FakeAdbd(port = tcpPort, authorized = true).use { other ->
+                boot()
+                world.waitUntil({ "the fast path to pass the listener by" }) { notUsed in log() }
+                check {
+                    assertEquals("no token signed", 0, other.signatures)
+                    assertEquals("no key offered", 0, other.offers)
+                }
+            }
+            // The listener held the port the restore needs; once it is gone the restore finishes.
+            awaitStartWork()
+        }
+
     // HEADLESS_STATUS reported "ADB: USB:on" right after this restore although adbd was listening
     // on the TCP port again: it named a Wi-Fi port only while wireless debugging was on, and the
     // restore turns wireless debugging back off. The port that is listening is what counts.

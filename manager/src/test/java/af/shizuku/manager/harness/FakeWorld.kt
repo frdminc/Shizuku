@@ -3,6 +3,7 @@ package af.shizuku.manager.harness
 import af.shizuku.manager.ShizukuApplication
 import af.shizuku.manager.ShizukuSettings
 import af.shizuku.manager.adb.AdbAuthWait
+import af.shizuku.manager.adb.AdbStarter
 import af.shizuku.manager.adb.WirelessDebugging
 import af.shizuku.manager.receiver.BootRetryWorker
 import af.shizuku.manager.receiver.ShizukuReceiverStarter
@@ -79,8 +80,8 @@ class FakeWorld(
     // system writes adb_wifi_enabled back to 0 without Wi-Fi, and on an untrusted network after
     // raising "Allow wireless debugging on this network?" ([trustPrompts]). The manager's key is
     // authorised there already (paired, or "Always allow" in adb_keys), and "tcpip:<port>" makes
-    // adbd listen on that port ([tcpAdbd]).
-    val wirelessAdbd = FakeAdbd(onShell = { serverUp() }, authorized = true, onTcpip = { openTcpPort(it) })
+    // adbd listen on that port ([tcpAdbd]). It speaks TLS, as adbd does on that port.
+    val wirelessAdbd = FakeAdbd(onShell = { serverUp() }, authorized = true, onTcpip = { openTcpPort(it) }, tls = true)
 
     /** adbd's classic TCP port once something has opened it; null while closed, as after a reboot. */
     @Volatile
@@ -89,6 +90,13 @@ class FakeWorld(
 
     /** A loopback port nothing listens on: the TCP-mode port a reboot (or adb usb) closed. */
     val closedTcpPort: Int = ServerSocket(0, 1, InetAddress.getLoopbackAddress()).use { it.localPort }
+
+    init {
+        // adbd's classic TCP ports, where it answers with the legacy token challenge: [adbd] (the
+        // saved port, where the key-offer dialog is raised), [tcpAdbd] and the closed TCP-mode port.
+        // Production asks the system for adbd's TCP port; these fakes listen on random ports.
+        AdbStarter.isLegacyAuthPort = { it == adbd.port || it == tcpAdbd?.port || it == closedTcpPort }
+    }
 
     class Wifi(
         val network: Network,
@@ -658,6 +666,7 @@ class FakeWorld(
         AdbAuthWait.elapsedMs = { android.os.SystemClock.elapsedRealtime() }
         AdbAuthWait.timeoutMs = AdbAuthWait.TIMEOUT_MS
         AdbAuthWait.schedule = AdbAuthWait.realSchedule
+        AdbStarter.isLegacyAuthPort = AdbStarter.realIsLegacyAuthPort
         timers.clear()
         serverDown()
     }

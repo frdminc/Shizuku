@@ -64,8 +64,8 @@ class OnePromptCoreScenariosTest {
         unmockkAll()
     }
 
-    /** A connection as AdbStarter.startAdb makes it: connect() returns once adbd accepts the key. */
-    private fun connect(): Future<Unit> = clients.submit<Unit> { AdbClient("127.0.0.1", adbd.port, key).use { it.connect() } }
+    /** A connection as AdbStarter.startAdb makes it to adbd's TCP port: connect() returns once adbd accepts the key. */
+    private fun connect(): Future<Unit> = clients.submit<Unit> { AdbClient("127.0.0.1", adbd.port, key, allowLegacyAuth = { true }).use { it.connect() } }
 
     private fun Future<Unit>.failure(): Throwable? =
         try {

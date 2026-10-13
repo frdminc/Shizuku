@@ -32,6 +32,9 @@ private const val TAG = "AdbClient"
 /** adbd's own upper bound for one message payload. */
 private const val MAX_PAYLOAD = 1024 * 1024
 
+/** adbd's legacy auth token length (TOKEN_SIZE in adb's protocol). */
+private const val ADB_TOKEN_SIZE = 20
+
 class AdbClient(
     private val host: String,
     private val port: Int,
@@ -39,7 +42,13 @@ class AdbClient(
     /** Called once, right after the public key was offered to adbd and the connection starts
      *  waiting for the user to accept the "Allow USB debugging?" dialog. */
     private val onAuthorizationPending: (() -> Unit)? = null,
-    private val tlsOnly: Boolean = false,
+    /**
+     * Whether this port may answer the hello with the legacy token challenge instead of TLS, asked
+     * when it does. Only adbd's own TCP port (adb tcpip) speaks it. Wireless debugging always
+     * switches to TLS, so a port found through mDNS or the loopback scan that answers otherwise is
+     * not the adbd this app paired with: the connection ends there, without answering.
+     */
+    private val allowLegacyAuth: () -> Boolean = { false },
     private val connectTimeoutMs: Int = 5000,
 ) : Closeable {
     private val socketLock = Any()
@@ -96,7 +105,9 @@ class AdbClient(
             write(A_CNXN, A_VERSION, A_MAXDATA, "host::")
 
             var message = read()
-            if (tlsOnly && message.command != A_STLS) error("scan requires ADB TLS")
+            if (message.command != A_STLS && !allowLegacyAuth()) {
+                throw AdbTlsRequiredException("adbd on port $port did not switch to TLS, which this port requires")
+            }
             if (message.command == A_STLS) {
                 if (!BuildUtils.atLeast29) {
                     error("Connect to adb with TLS is not supported before Android 9")
@@ -116,6 +127,8 @@ class AdbClient(
                 message = read()
             } else if (message.command == A_AUTH) {
                 if (message.arg0 != ADB_AUTH_TOKEN) error("not A_AUTH ADB_AUTH_TOKEN")
+                // adbd's tokens are always 20 bytes (TOKEN_SIZE); sign nothing else.
+                if (message.data?.size != ADB_TOKEN_SIZE) error("adb token of unexpected size ${message.data?.size}")
                 write(A_AUTH, ADB_AUTH_SIGNATURE, 0, key.sign(message.data))
 
                 message = read()
@@ -392,3 +405,8 @@ class AdbClient(
         }
     }
 }
+
+/** The peer on a port that must use TLS answered without it; nothing was signed or offered. */
+class AdbTlsRequiredException(
+    message: String,
+) : IllegalStateException(message)

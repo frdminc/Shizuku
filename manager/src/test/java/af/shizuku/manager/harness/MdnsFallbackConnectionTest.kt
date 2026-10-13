@@ -177,6 +177,28 @@ class MdnsFallbackConnectionTest {
         }
     }
 
+    // The same rule before Android 11: the legacy token challenge only on the TCP port adbd reports.
+    @Test
+    @Config(sdk = [29])
+    fun `Android 10 answers the legacy challenge only on adbd's reported port`() {
+        // setup() builds no FakeWorld below Android 11; EnvironmentUtils needs only the app context.
+        af.shizuku.manager.ShizukuApplication::class.java
+            .getDeclaredField("appContext")
+            .apply { isAccessible = true }
+            .set(null, RuntimeEnvironment.getApplication())
+        val real = af.shizuku.manager.adb.AdbStarter.realIsLegacyAuthPort
+        try {
+            assertFalse(real(5555))
+            org.robolectric.shadows.ShadowSystemProperties
+                .override("service.adb.tcp.port", "5555")
+            assertTrue(real(5555))
+            assertFalse(real(5556))
+        } finally {
+            org.robolectric.shadows.ShadowSystemProperties
+                .reset()
+        }
+    }
+
     @Test
     @Config(sdk = [29])
     fun `Android 10 does not start real scan`() {

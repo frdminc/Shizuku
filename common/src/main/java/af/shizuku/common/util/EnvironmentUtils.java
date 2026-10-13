@@ -85,4 +85,9 @@ public class EnvironmentUtils {
         if (port == -1) port = SystemProperties.getInt("persist.adb.tcp.port", -1);
         return port;
     }
+
+    /** adbd's explicit listen addresses (service.adb.listen_addrs); when set, adbd ignores the TCP port properties. */
+    public static String getAdbListenAddrs() {
+        return SystemProperties.get("service.adb.listen_addrs", "");
+    }
 }

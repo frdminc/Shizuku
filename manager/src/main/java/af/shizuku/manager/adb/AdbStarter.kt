@@ -16,6 +16,7 @@ import android.content.pm.PackageManager
 import android.provider.Settings
 import android.view.ContextThemeWrapper
 import android.widget.Toast
+import androidx.annotation.VisibleForTesting
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import io.sentry.Sentry
 import kotlinx.coroutines.CancellationException
@@ -40,6 +41,26 @@ object AdbStarter {
     // HeadlessLogger component: what a release build can still report about a start.
     private const val LOG = "AdbStarter"
 
+    /**
+     * Whether adbd may be asked to use the legacy token challenge on [port] (see AdbClient's
+     * allowLegacyAuth): only on the TCP port adbd itself reports listening on
+     * (service.adb.tcp.port, then persist.adb.tcp.port), on every Android version, and not when
+     * service.adb.listen_addrs puts adbd on other addresses (adbd then ignores the port
+     * properties). A device whose properties cannot be read gets no legacy connection. Old TVs
+     * without TLS fall back to the configured TCP port, as EnvironmentUtils does.
+     */
+    internal val realIsLegacyAuthPort: (Int) -> Boolean = { port ->
+        val listen =
+            af.shizuku.common.util.EnvironmentUtils
+                .getAdbListenAddrs()
+        port in 1..65535 &&
+            port == EnvironmentUtils.getAdbTcpPort() &&
+            (listen.isBlank() || listen.split(',').any { it.trim().endsWith(":$port") })
+    }
+
+    @VisibleForTesting
+    internal var isLegacyAuthPort: (Int) -> Boolean = realIsLegacyAuthPort
+
     private fun Context.getActivity(): Activity? {
         var context = this
         while (context is ContextWrapper) {
@@ -58,6 +79,7 @@ object AdbStarter {
             this is SSLException ||
             this is AdbKeyException ||
             this is AdbAuthPendingException ||
+            this is AdbTlsRequiredException ||
             (includeIllegalState && this is IllegalStateException)
 
     /**
@@ -137,7 +159,7 @@ object AdbStarter {
                 fun nextClient(): AdbClient {
                     val connected = retained
                     retained = null
-                    return connected ?: AdbClient("127.0.0.1", activePort, key, onPending)
+                    return connected ?: activePort.let { p -> AdbClient("127.0.0.1", p, key, onPending, allowLegacyAuth = { isLegacyAuthPort(p) }) }
                 }
 
                 suspend fun connectUnlessRetained(client: AdbClient) {
@@ -194,6 +216,9 @@ object AdbStarter {
             }
         } catch (e: Exception) {
             if (e is AdbAuthPendingException) stoodDown = true
+            if (e is AdbTlsRequiredException) {
+                HeadlessLogger.w(LOG, "port $port answered without TLS; adbd reports tcp port ${EnvironmentUtils.getAdbTcpPort()}")
+            }
             Timber.tag(TAG).e(e, "startAdb failed on port %d: %s", port, e.message)
             HeadlessLogger.w(LOG, "failed on port $port: ${HeadlessLogger.brief(e)}")
             if (e is SSLException && (e.message?.contains("protocol version") == true || e is javax.net.ssl.SSLProtocolException)) {
@@ -246,7 +271,7 @@ object AdbStarter {
                 ShizukuStateMachine.set(ShizukuStateMachine.State.STOPPING)
                 val key = AdbKey(PreferenceAdbKeyStore(ShizukuSettings.getPreferences()), "shizuku+")
                 withContext(Dispatchers.IO) {
-                    AdbClient("127.0.0.1", port, key).use { client ->
+                    AdbClient("127.0.0.1", port, key, allowLegacyAuth = { isLegacyAuthPort(port) }).use { client ->
                         connectWithRetry(client, port)
                         client.command("usb:")
                     }
@@ -318,7 +343,9 @@ object AdbStarter {
                         // A CAS loser must stand down, not reconnect: a retry could claim the
                         // slot the instant its owner releases it and offer a second key, or —
                         // once the owner's key is accepted — start a second server in parallel.
-                        e is AdbAuthPendingException
+                        e is AdbAuthPendingException ||
+                        // The peer would not use TLS on a port that requires it; it will not change.
+                        e is AdbTlsRequiredException
                     ) {
                         throw e
                     }
