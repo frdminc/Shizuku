@@ -1080,6 +1080,9 @@ object WirelessDebugging {
                 try {
                     client.connect()
                     client.seenPin != null && client.seenPin == expected
+                } catch (e: AdbServerCertChangedException) {
+                    // Thrown only after a key mismatch, including a newer recorded key than [expected].
+                    false
                 } catch (e: Exception) {
                     if (e is CancellationException) throw e
                     val seen = client.seenPin

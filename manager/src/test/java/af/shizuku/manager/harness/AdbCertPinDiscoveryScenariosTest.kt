@@ -439,6 +439,27 @@ class AdbCertPinDiscoveryScenariosTest {
         }
     }
 
+    @Test fun `probe of the required key after another key was recorded reports a mismatch`() {
+        pin(world.wirelessAdbd)
+        FakeAdbd(tls = true, fixedCertificate = true).use { listener ->
+            val key = AdbKey(PreferenceAdbKeyStore(world.prefs), "shizuku+")
+            runCatching { AdbClient("127.0.0.1", listener.port, key, commitFirstUse = false).use { it.connect() } }
+            WirelessDebugging.discovery =
+                WirelessDebugging.PortDiscovery { _, onPort ->
+                    onPort(listener.port)
+                    ({})
+                }
+            WirelessDebugging.discoveryMs = 100
+            val notes = mutableListOf<String>()
+            val session = WirelessDebugging.Session(world.app, notes::add, notes::add, { false })
+            // The session requires the key this port presents, but the store has since recorded another.
+            session.requireMatchingPin(AdbServerPin.of(listener.certificates.first()))
+            runCatching { runBlocking { session.findPort() } }
+            assertTrue(notes.toString(), notes.any { it.contains("port ${listener.port} did not match the recorded adbd key") })
+            assertFalse(notes.toString(), notes.any { it.contains("handshake failed") })
+        }
+    }
+
     @Test fun `silent probe returns within three seconds`() {
         pin(world.wirelessAdbd)
         FakeAdbd(silentHello = true).use { listener ->
