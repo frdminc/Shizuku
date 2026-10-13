@@ -257,7 +257,7 @@ class AdbPairingClient(
         s.soTimeout = 15000 // 15 seconds read timeout to prevent infinite hangs during pairing
         s.keepAlive = true
 
-        val sslContext = key.sslContext
+        val sslContext = key.sslContext(PairingAdbServerTrustManager)
         val sslSocket = sslContext.socketFactory.createSocket(s, host, port, true) as SSLSocket
         sslSocket.startHandshake()
         Timber.tag(TAG).d("Handshake succeeded.")

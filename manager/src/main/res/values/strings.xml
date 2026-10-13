@@ -834,6 +834,10 @@
     <string name="adb_error_ssl_title">Connection Error</string>
     <string name="adb_error_ssl_message">Wireless ADB handshake failed (SSL protocol error). This typically happens when ADB keys are corrupted. Would you like to reset them in Developer Options?</string>
     <string name="adb_error_ssl_button_reset">Go to Developer Options</string>
+    <string name="adb_changed_cert_title">Wireless debugging key changed</string>
+    <string name="adb_changed_cert_message">Wireless debugging is presenting a different key from the one it used earlier this boot. This is expected only if wireless debugging or USB debugging was restarted. Use the new key?</string>
+    <string name="adb_changed_cert_message_with_fingerprint">Wireless debugging is presenting a different key from the one it used earlier this boot. This is expected only if wireless debugging or USB debugging was restarted.\n\nNew key fingerprint: %1$s\n\nUse the new key?</string>
+    <string name="adb_changed_cert_use_new">Use new key</string>
 
     <!-- Dark Mode Setting Override -->
     <string name="dark_theme">Theme</string>
@@ -1670,4 +1674,8 @@
 
     <!-- App list: the server could not be asked for this app's permission state; tap retries -->
     <string name="app_management_item_state_unresolved">Permission state unavailable, tap to retry</string>
+    <string name="adb_first_cert_title">Record wireless debugging key?</string>
+    <string name="adb_first_cert_message">No wireless debugging key is recorded for this boot yet. Record the key shown by this connection and start?\n\nNew key: %1$s</string>
+    <string name="adb_pin_missing_notice">No key recorded for this boot yet. Open the app and tap Start to confirm the key.</string>
+    <string name="adb_pin_changed_notice">Wireless debugging’s key changed. Open the app and tap Start to confirm it.</string>
 </resources>

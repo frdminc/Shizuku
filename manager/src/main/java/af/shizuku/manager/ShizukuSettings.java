@@ -410,6 +410,15 @@ public class ShizukuSettings {
         return storageContext;
     }
 
+    public static String getAdbPinBootCount() {
+        if (sContext == null) return null;
+        try {
+            return Integer.toString(Settings.Global.getInt(sContext.getContentResolver(), Settings.Global.BOOT_COUNT));
+        } catch (Settings.SettingNotFoundException e) {
+            return null;
+        }
+    }
+
     public static void initialize(Context context) {
         if (sPreferences == null) {
             sPreferences = getSettingsStorageContext(context)

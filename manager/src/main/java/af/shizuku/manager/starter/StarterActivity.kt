@@ -119,6 +119,31 @@ class StarterActivity : AppBarActivity() {
                 .setOnCancelListener { finish() }
                 .show()
         }
+
+        viewModel.confirmChangedCert.observe(this) { state ->
+            if (state == null || isFinishing || isDestroyed) return@observe
+            binding.progressIndicator.visibility = View.GONE
+            binding.cancelButton.visibility = View.GONE
+            val fingerprint = state.seenPin.take(16).uppercase()
+            val message =
+                if (state.firstUse) {
+                    getString(R.string.adb_first_cert_message, fingerprint)
+                } else if (fingerprint.isNotEmpty()) {
+                    getString(R.string.adb_changed_cert_message_with_fingerprint, fingerprint)
+                } else {
+                    getString(R.string.adb_changed_cert_message)
+                }
+            MaterialAlertDialogBuilder(this)
+                .setTitle(if (state.firstUse) R.string.adb_first_cert_title else R.string.adb_changed_cert_title)
+                .setMessage(message)
+                .setPositiveButton(R.string.adb_changed_cert_use_new) { _, _ ->
+                    binding.progressIndicator.visibility = View.VISIBLE
+                    binding.cancelButton.visibility = View.VISIBLE
+                    viewModel.confirmChangedCert()
+                }.setNegativeButton(android.R.string.cancel) { _, _ -> finish() }
+                .setOnCancelListener { finish() }
+                .show()
+        }
     }
 
     private var hasStarted = false
@@ -175,6 +200,17 @@ class ViewModel(
     /** True while an ADB start is held for the user to confirm it (see [start]). */
     val confirmUnanswered = _confirmUnanswered as LiveData<Boolean>
 
+    data class ChangedCertState(
+        /** The SHA-256 pin seen from the changed certificate, if any. */
+        val seenPin: String,
+        val firstUse: Boolean = false,
+    )
+
+    private val _confirmChangedCert = MutableLiveData<ChangedCertState?>(null)
+
+    /** Non-null while an ADB start is asking the user to confirm a changed adbd key. */
+    val confirmChangedCert = _confirmChangedCert as LiveData<ChangedCertState?>
+
     private val handler =
         CoroutineExceptionHandler { _, throwable ->
             if (throwable !is CancellationException) {
@@ -194,6 +230,8 @@ class ViewModel(
     private var lastRoot = false
     private var lastSystem = false
     private var lastPort = 0
+    private var lastUserGesture = false
+    private var confirmedPin: String? = null
 
     fun start(
         root: Boolean,
@@ -204,6 +242,7 @@ class ViewModel(
         lastRoot = root
         lastSystem = isSystem
         lastPort = port
+        lastUserGesture = userGesture
         if (userGesture) confirmation.confirm()
         if (!root && !isSystem && port !in 1..65535) {
             log(error = IllegalArgumentException("Invalid port value: $port. Port must be between 1 and 65535."))
@@ -233,7 +272,23 @@ class ViewModel(
                     startSys()
                 } else {
                     try {
-                        AdbStarter.startAdb(appContext, port, { log(it) })
+                        AdbStarter.startAdb(
+                            appContext,
+                            port,
+                            { log(it) },
+                            userGesture = userGesture,
+                            confirmedPin = confirmedPin,
+                        )
+                    } catch (e: af.shizuku.manager.adb.AdbServerPinException) {
+                        if (userGesture && e.seenPin != null && confirmedPin == null) {
+                            // The user made this start by hand: ask before replacing the pin. A
+                            // start without the gesture (exported intent, tile, boot, headless)
+                            // is reported as a normal failure.
+                            started = false
+                            _confirmChangedCert.postValue(ChangedCertState(e.seenPin, e is af.shizuku.manager.adb.AdbServerPinMissingException))
+                            return@launch
+                        }
+                        throw e
                     } catch (e: af.shizuku.manager.adb.AdbAuthPendingException) {
                         // Another start owns the authorisation dialog. Informational, not a failure:
                         // the generic handler would reset the owner's STARTING state to STOPPED and
@@ -241,6 +296,8 @@ class ViewModel(
                         log(appContext.getString(af.shizuku.manager.R.string.wadb_notification_awaiting_auth) + "\n")
                         started = false
                         return@launch
+                    } finally {
+                        confirmedPin = null
                     }
                 }
                 Starter.waitForBinder({ log(it) })
@@ -251,15 +308,22 @@ class ViewModel(
     fun confirmUnanswered() {
         confirmation.confirm()
         _confirmUnanswered.value = false
-        start(lastRoot, lastSystem, lastPort)
+        start(lastRoot, lastSystem, lastPort, lastUserGesture)
+    }
+
+    fun confirmChangedCert() {
+        confirmedPin = _confirmChangedCert.value?.seenPin ?: return
+        _confirmChangedCert.value = null
+        start(lastRoot, lastSystem, lastPort, lastUserGesture)
     }
 
     fun retry() {
         started = false
         confirmation.confirm()
+        confirmedPin = null
         sb.clear()
         _output.postValue(Resource.success(sb))
-        start(lastRoot, lastSystem, lastPort)
+        start(lastRoot, lastSystem, lastPort, lastUserGesture)
     }
 
     private suspend fun startSys() {

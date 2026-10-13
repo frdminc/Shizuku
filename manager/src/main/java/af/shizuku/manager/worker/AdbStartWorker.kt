@@ -126,7 +126,8 @@ class AdbStartWorker(
                 }
             }
 
-            Settings.Global.putInt(cr, Settings.Global.ADB_ENABLED, 1)
+            af.shizuku.manager.adb.AdbServerPin
+                .putSetting(applicationContext, Settings.Global.ADB_ENABLED, 1)
             Settings.Global.putLong(cr, "adb_allowed_connection_time", 0L)
 
             // TCP mode: when the port is listening, connect to it directly (no Wireless Debugging or
@@ -220,7 +221,30 @@ class AdbStartWorker(
                 .tag("AdbStartWorker")
                 .i("doWork: resolved port %d, starting ADB client", port)
             note("starting adb on port $port")
-            AdbStarter.startAdb(applicationContext, port, connectedClient = discoverySession?.scannedClient)
+            try {
+                AdbStarter.startAdb(applicationContext, port, connectedClient = discoverySession?.scannedClient)
+            } catch (e: af.shizuku.manager.adb.AdbServerCertChangedException) {
+                // The saved or mDNS port presented a different key. Keep discovering: the real adbd
+                // may be on another mDNS result or reachable by the loopback scan, where the pinned
+                // key will still match.
+                if (tcpPort > 0 && isWifiOk || savedPort > 0 && isWifiOk && runAttemptCount == 0) {
+                    note("port $port presented a changed adbd key; continuing to discovery")
+                    discoverySession?.restore()
+                    val discoveredPort =
+                        wirelessSession()
+                            .also {
+                                it.requireMatchingPin(
+                                    af.shizuku.manager.adb.AdbServerPin
+                                        .store()
+                                        .connectPin,
+                                )
+                            }.findPort()
+                    note("starting adb on discovered port $discoveredPort")
+                    AdbStarter.startAdb(applicationContext, discoveredPort, connectedClient = discoverySession?.scannedClient)
+                } else {
+                    throw e
+                }
+            }
             Starter.waitForBinder()
             ManagerActivityLog.log(applicationContext, "Service started via background ADB worker on port $port")
             WirelessDebugging.clearNoWifi(applicationContext)
@@ -268,6 +292,13 @@ class AdbStartWorker(
                     WirelessDebugging.watch(applicationContext)
                 }
             }
+            if (ShizukuStateMachine.get() == ShizukuStateMachine.State.STARTING) {
+                ShizukuStateMachine.set(ShizukuStateMachine.State.STOPPED)
+            }
+            return Result.failure()
+        } catch (e: af.shizuku.manager.adb.AdbServerPinException) {
+            showErrorNotification(applicationContext, e)
+            warn("FAILURE ${e.message}; no WorkManager retry")
             if (ShizukuStateMachine.get() == ShizukuStateMachine.State.STARTING) {
                 ShizukuStateMachine.set(ShizukuStateMachine.State.STOPPED)
             }
@@ -481,6 +512,8 @@ class AdbStartWorker(
 
     private fun Throwable.toUserMessage(context: Context): String =
         when {
+            this is af.shizuku.manager.adb.AdbServerPinMissingException -> context.getString(R.string.adb_pin_missing_notice)
+            this is af.shizuku.manager.adb.AdbServerCertChangedException -> context.getString(R.string.adb_pin_changed_notice)
             this is java.net.ConnectException || this is java.net.SocketTimeoutException ->
                 context.getString(R.string.wadb_error_cannot_connect)
             this is java.util.concurrent.TimeoutException ->
@@ -553,7 +586,7 @@ class AdbStartWorker(
         val bigText = if (devDetail != null) "$shortMsg\n\n$devDetail" else shortMsg
 
         val intent =
-            Intent(context, BugReportDialogActivity::class.java).apply {
+            Intent(context, if (e is af.shizuku.manager.adb.AdbServerPinException) MainActivity::class.java else BugReportDialogActivity::class.java).apply {
                 flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
             }
         val pendingIntent =

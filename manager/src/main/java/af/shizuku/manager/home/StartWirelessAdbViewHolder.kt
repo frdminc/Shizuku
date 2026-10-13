@@ -56,6 +56,37 @@ class StartWirelessAdbViewHolder(
                 StartWirelessAdbViewHolder(inner, outer, scope, homeModel)
             }
 
+        /**
+         * Chooses the port a one-tap Home Start should dial. Live ports (loopback probe, system
+         * property, mDNS) always outrank the pending hint, which is only a fallback when no live
+         * port is known.
+         */
+        fun resolveStartPort(
+            activeLoopbackPort: Int,
+            sysPropPort: Int,
+            discoveredPort: Int,
+            pendingPort: Int,
+            lastPort: Int,
+        ): Pair<Int, Int> {
+            val livePort =
+                when {
+                    activeLoopbackPort in 1..65535 -> activeLoopbackPort
+                    sysPropPort in 1..65535 -> sysPropPort
+                    discoveredPort in 1..65535 -> discoveredPort
+                    pendingPort in 1..65535 -> pendingPort
+                    else -> -1
+                }
+            val validPort =
+                if (livePort > 0) {
+                    livePort
+                } else if (lastPort in 1..65535) {
+                    lastPort
+                } else {
+                    -1
+                }
+            return livePort to validPort
+        }
+
         fun start(
             context: android.content.Context,
             scope: CoroutineScope,
@@ -105,7 +136,8 @@ class StartWirelessAdbViewHolder(
 
             val cr = context.contentResolver
             if (context.checkSelfPermission(WRITE_SECURE_SETTINGS) == PackageManager.PERMISSION_GRANTED) {
-                Settings.Global.putInt(cr, Settings.Global.ADB_ENABLED, 1)
+                af.shizuku.manager.adb.AdbServerPin
+                    .putSetting(context, Settings.Global.ADB_ENABLED, 1)
                 Settings.Global.putLong(cr, "adb_allowed_connection_time", 0L)
             }
 
@@ -126,21 +158,16 @@ class StartWirelessAdbViewHolder(
                     af.shizuku.manager.adb.AdbPortProber
                         .findActiveLoopbackPort(context)
 
-                val livePort =
-                    when {
-                        activeLoopbackPort in 1..65535 -> activeLoopbackPort
-                        sysPropPort in 1..65535 -> sysPropPort
-                        discoveredPort in 1..65535 -> discoveredPort
-                        else -> -1
-                    }
-                val validPort =
-                    if (livePort > 0) {
-                        livePort
-                    } else if (lastPort in 1..65535) {
-                        lastPort
-                    } else {
-                        -1
-                    }
+                val (livePort, validPort) =
+                    resolveStartPort(
+                        activeLoopbackPort = activeLoopbackPort,
+                        sysPropPort = sysPropPort,
+                        discoveredPort = discoveredPort,
+                        pendingPort =
+                            af.shizuku.manager.adb.AdbServerPin
+                                .pendingPortForCurrentBoot(),
+                        lastPort = lastPort,
+                    )
 
                 if (validPort <= 0 && !EnvironmentUtils.isTlsSupported()) {
                     WadbNotEnabledDialogFragment().show(context.asActivity<FragmentActivity>().supportFragmentManager)

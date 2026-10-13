@@ -38,7 +38,7 @@ class MdnsFallbackConnectionTest {
                 af.shizuku.manager.adb
                     .PreferenceAdbKeyStore(world.prefs),
                 "test",
-            ).sslContext
+            ).sslContext(af.shizuku.manager.adb.PairingAdbServerTrustManager)
     }
 
     @After fun cleanup() {
@@ -64,7 +64,7 @@ class MdnsFallbackConnectionTest {
 
     @Test fun `real scan hands over TLS client and accepts fresh certificate on next connection`() {
         val commands = LinkedBlockingQueue<String>()
-        FakeAdbd(tls = true, onShell = { commands.add(it) }).use { server ->
+        FakeAdbd(tls = true, fixedKey = true, onShell = { commands.add(it) }).use { server ->
             repeat(2) {
                 val results = LinkedBlockingQueue<WirelessDebugging.ScanResult>()
                 stops += LoopbackAdbScan.start(world.app, { results.add(it) }, server.port..server.port, budgetMs = 8_000)
@@ -87,6 +87,21 @@ class MdnsFallbackConnectionTest {
             assertFalse(server.certificates[0].encoded.contentEquals(server.certificates[1].encoded))
             assertEquals(0, server.offers)
             assertEquals(0, server.signatures)
+        }
+    }
+
+    @Test fun `scan discards changed certificate without returning a result`() {
+        val pins =
+            af.shizuku.manager.adb.AdbServerPin
+                .store()
+        pins.commit("different-key", pins.snapshot())
+        FakeAdbd(tls = true).use { server ->
+            val results = LinkedBlockingQueue<WirelessDebugging.ScanResult>()
+            stops += LoopbackAdbScan.start(world.app, { results.add(it) }, server.port..server.port, budgetMs = 3_000)
+            await { server.connections == 1 && server.activeConnections == 0 }
+            await { scanThreads().isEmpty() }
+            assertTrue(results.isEmpty())
+            assertEquals(0, server.clientCertificates.get())
         }
     }
 

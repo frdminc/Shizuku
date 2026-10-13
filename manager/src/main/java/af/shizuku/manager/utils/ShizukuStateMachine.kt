@@ -245,8 +245,8 @@ object ShizukuStateMachine {
                             // This runs asynchronously so it doesn't block the state transition.
                             CoroutineScope(Dispatchers.IO).launch {
                                 try {
-                                    Settings.Global.putInt(
-                                        context.contentResolver,
+                                    af.shizuku.manager.adb.AdbServerPin.putSetting(
+                                        context,
                                         "adb_wifi_enabled",
                                         0,
                                     )
@@ -311,7 +311,8 @@ object ShizukuStateMachine {
                         val permissionGranted = context.checkSelfPermission(WRITE_SECURE_SETTINGS) == PackageManager.PERMISSION_GRANTED
                         val shouldDisableUsbDebugging = permissionGranted && ShizukuSettings.getAutoDisableUsbDebugging()
                         if (shouldDisableUsbDebugging) {
-                            Settings.Global.putInt(context.contentResolver, Settings.Global.ADB_ENABLED, 0)
+                            af.shizuku.manager.adb.AdbServerPin
+                                .putSetting(context, Settings.Global.ADB_ENABLED, 0)
                         }
                     } catch (_: UninitializedPropertyAccessException) {
                         Timber.tag("ShizukuStateMachine").w("Skipping USB debugging disable: appContext not initialized yet")

@@ -36,9 +36,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
-import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 
 /**
@@ -148,6 +148,9 @@ object WirelessDebugging {
 
     // Rounds of "Wi-Fi, turn it on, discover", each started again when Wi-Fi changes under it.
     private const val MAX_ROUNDS = 3
+
+    // mDNS can announce many ports; verify serially, so keep only the newest candidates.
+    private const val MAX_PENDING_PORTS = 16
 
     enum class Blocked { NO_WIFI, UNTRUSTED_NETWORK }
 
@@ -280,7 +283,7 @@ object WirelessDebugging {
         context: Context,
         value: Int,
     ) {
-        Settings.Global.putInt(context.contentResolver, SETTING, value)
+        AdbServerPin.putSetting(context, SETTING, value)
     }
 
     private fun bootCount(context: Context): Int = runCatching { Settings.Global.getInt(context.contentResolver, Settings.Global.BOOT_COUNT, 0) }.getOrDefault(0)
@@ -996,6 +999,14 @@ object WirelessDebugging {
         private val quiet: Boolean = false,
         private val tcpPortOpen: (suspend () -> Boolean)? = null,
     ) {
+        private var requiredPin: String? = null
+        private var changedCertSeen = false
+
+        fun requireMatchingPin(pin: String?) {
+            requiredPin = pin
+            changedCertSeen = true
+        }
+
         var scannedClient: AdbClient? = null
             private set
 
@@ -1043,6 +1054,36 @@ object WirelessDebugging {
         private fun userRemaining(): Long {
             val deadline = userDeadline ?: (elapsedMs() + userWaitMs).also { userDeadline = it }
             return minOf(deadline, sessionDeadline()) - elapsedMs()
+        }
+
+        /**
+         * Opens a short TLS probe to [port] to check the pinned key. Does not commit a first-use
+         * pin, so it is safe to use while still searching for the real adbd. Transport errors are
+         * rethrown so the caller can retry the same port later instead of treating it as a refusal.
+         */
+        private suspend fun verifyPort(port: Int): Boolean {
+            val prefs = ShizukuSettings.getPreferences() ?: return false
+            val key = runCatching { AdbKey(PreferenceAdbKeyStore(prefs), "shizuku+") }.getOrNull() ?: return false
+            return try {
+                AdbClient("127.0.0.1", port, key, connectTimeoutMs = 2000, commitFirstUse = false, expectedPin = requiredPin).use {
+                    it.connect()
+                    it.seenPin != null && it.seenPin == (requiredPin ?: AdbServerPin.store().connectPin)
+                }
+            } catch (e: AdbServerCertChangedException) {
+                false
+            } catch (e: java.net.ConnectException) {
+                throw e
+            } catch (e: java.net.SocketTimeoutException) {
+                throw e
+            } catch (e: java.net.SocketException) {
+                throw e
+            } catch (e: javax.net.ssl.SSLException) {
+                // Handshake failures from a closed or reset socket are transient; a real mismatch
+                // is already raised as AdbServerCertChangedException.
+                throw e
+            } catch (_: Exception) {
+                false
+            }
         }
 
         /** How long ago Wi-Fi appeared, as far as anything here can tell; boot is the upper bound. */
@@ -1205,25 +1246,74 @@ object WirelessDebugging {
             }
             // Already on but announcing nothing: turn it off and on once for a fresh announcement.
             var mayToggle = before == 1
-            val found = AtomicInteger(0)
+            val found = ConcurrentLinkedQueue<Pair<Int, Boolean>>()
+            val checkedPorts = mutableSetOf<Int>()
             val winnerLock = Any()
             var accepting = true
-            var scanned = false
+            var scanResult: ScanResult? = null
             var scanStarted = false
             var stopScan: () -> Unit = {}
             val stop =
                 discovery.start(context) { p ->
                     synchronized(winnerLock) {
-                        if (accepting && p in 1..65535) found.compareAndSet(0, p)
+                        if (accepting && p in 1..65535) {
+                            if (found.size >= MAX_PENDING_PORTS) found.poll()
+                            found.add(p to false)
+                        }
                     }
                 }
             try {
                 var deadline = elapsedMs() + discoveryMs
                 while (true) {
-                    val port = found.get()
+                    val (port, fromScan) =
+                        synchronized(winnerLock) {
+                            val candidate =
+                                if (elapsedMs() < deadline && elapsedMs() < sessionDeadline()) found.poll() else null
+                            if (candidate?.second == true) {
+                                scannedClient = scanResult?.client
+                                scanResult = null
+                            }
+                            candidate ?: (0 to false)
+                        }
                     if (port > 0) {
+                        if (!fromScan && port in checkedPorts) {
+                            delay(pollMs)
+                            continue
+                        }
+                        // Keep every candidate, and after a refusal require the original pin.
+                        val currentPin = requiredPin ?: AdbServerPin.store().connectPin
+                        val refused =
+                            try {
+                                (!fromScan && (currentPin != null || changedCertSeen) && !verifyPort(port)) ||
+                                    (fromScan && changedCertSeen && (currentPin == null || scannedClient?.seenPin != currentPin))
+                            } catch (e: java.net.ConnectException) {
+                                note("port $port is not accepting yet; keeping it for retry")
+                                continue
+                            } catch (e: java.net.SocketTimeoutException) {
+                                note("port $port timed out; keeping it for retry")
+                                continue
+                            } catch (e: java.net.SocketException) {
+                                note("port $port reset; keeping it for retry")
+                                continue
+                            } catch (e: javax.net.ssl.SSLException) {
+                                note("port $port handshake failed; keeping it for retry")
+                                continue
+                            }
+                        if (refused) {
+                            if (fromScan) closeConnection()
+                            if (!fromScan) checkedPorts.add(port)
+                            if (currentPin == null) {
+                                note("no key recorded for this boot; continuing discovery")
+                                throw AdbServerPinMissingException(null)
+                            }
+                            note("port $port did not match the recorded adbd key; continuing discovery")
+                            requiredPin = currentPin
+                            changedCertSeen = true
+                            mayToggle = false
+                            continue
+                        }
                         setWritePending(context, false)
-                        val path = if (scanned) "scan" else "mDNS"
+                        val path = if (fromScan) "scan" else "mDNS"
                         note("$path found port $port")
                         af.shizuku.manager.utils.ManagerActivityLog
                             .log(context, "Wireless ADB $path found port $port")
@@ -1285,18 +1375,17 @@ object WirelessDebugging {
                         if (locked()) awaitUnlock()
                         untrusted(network)
                         deadline = elapsedMs() + discoveryMs
-                    } else if (elapsedMs() >= minOf(deadline, sessionDeadline())) {
-                        if (!mayToggle || elapsedMs() >= sessionDeadline()) {
+                    } else if ((changedCertSeen && !scanStarted && found.isEmpty()) || elapsedMs() >= minOf(deadline, sessionDeadline())) {
+                        if (!mayToggle || changedCertSeen || elapsedMs() >= sessionDeadline()) {
                             if (!scanStarted && remaining() > 0) {
                                 scanStarted = true
                                 deadline = minOf(elapsedMs() + scanBudgetMs, sessionDeadline())
                                 val scanStop =
                                     discovery.scan(context) { result ->
                                         synchronized(winnerLock) {
-                                            if (accepting && result.port in 1..65535 && found.get() == 0) {
-                                                scannedClient = result.client
-                                                scanned = true
-                                                found.set(result.port)
+                                            if (accepting && result.port in 1..65535 && scanResult == null) {
+                                                scanResult = result
+                                                found.add(result.port to true)
                                             } else {
                                                 result.client?.abort()
                                                 result.client?.close()
@@ -1310,6 +1399,15 @@ object WirelessDebugging {
                             }
                             // On all this time: the write was accepted, no prompt.
                             if (setting(context) == 1) setWritePending(context, false)
+                            if (changedCertSeen) {
+                                val currentPin = requiredPin ?: AdbServerPin.store().connectPin
+                                if (currentPin == null) {
+                                    warn("no key recorded for this boot")
+                                    throw AdbServerPinMissingException(null)
+                                }
+                                warn("every discovered adbd endpoint presented a changed TLS key")
+                                throw AdbServerCertChangedException(null, null)
+                            }
                             warn("mDNS discovery timed out after ${discoveryMs / 1000} s (adb_wifi_enabled=${setting(context)})")
                             throw TimeoutException("Timed out during mDNS port discovery")
                         }
@@ -1325,10 +1423,14 @@ object WirelessDebugging {
                     delay(pollMs)
                 }
             } finally {
-                synchronized(winnerLock) { accepting = false }
+                synchronized(winnerLock) {
+                    accepting = false
+                    scanResult?.client?.close()
+                    scanResult = null
+                }
                 stopScan()
                 stop()
-                if (kotlin.coroutines.coroutineContext[kotlinx.coroutines.Job]?.isActive == false || found.get() == 0) closeConnection()
+                if (kotlin.coroutines.coroutineContext[kotlinx.coroutines.Job]?.isActive == false || scannedClient == null) closeConnection()
             }
         }
 

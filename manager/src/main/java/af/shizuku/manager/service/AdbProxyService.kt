@@ -90,24 +90,34 @@ class AdbProxyService : Service() {
 
                 // Step 2: Restart adbd — try multiple approaches for vendor compatibility
                 // Primary: ctl.restart is the most compatible init signal (works on AOSP, Samsung, Xiaomi)
-                val restartViaCtl = execShellCommand(arrayOf("setprop", "ctl.restart", "adbd"))
+                var restarted = execShellCommand(arrayOf("setprop", "ctl.restart", "adbd"))
 
-                if (!restartViaCtl || EnvironmentUtils.isSamsung()) {
+                if (!restarted || EnvironmentUtils.isSamsung()) {
                     // Samsung specific: sometimes ctl.restart is ignored, toggling the property forces a restart
                     execShellCommand(arrayOf("setprop", "adb.network.port", port.toString()))
 
                     // Fallback A: explicit stop/start (AOSP init services)
                     val stopped = execShellCommand(arrayOf("stop", "adbd"))
-                    if (stopped) {
-                        execShellCommand(arrayOf("start", "adbd"))
-                    } else {
-                        // Fallback B: pkill lets init auto-restart the daemon
-                        execShellCommand(arrayOf("pkill", "adbd"))
-                    }
+                    val fallbackRestarted =
+                        if (stopped) {
+                            execShellCommand(arrayOf("start", "adbd"))
+                        } else {
+                            // Fallback B: pkill lets init auto-restart the daemon
+                            execShellCommand(arrayOf("pkill", "adbd"))
+                        }
+                    restarted = restarted || fallbackRestarted
+                }
+
+                // Invalidate the pin only once adbd has actually been asked to restart. A failed
+                // restart leaves the existing pin in place.
+                if (restarted) {
+                    af.shizuku.manager.adb.AdbServerPin
+                        .store()
+                        .clear()
                 }
 
                 Timber.tag(TAG).i("adbd TCP mode enabled on port $port")
-                true
+                restarted
             } catch (e: Exception) {
                 Timber.tag(TAG).e(e, "Failed to enable adbd TCP mode")
                 false
@@ -132,13 +142,21 @@ class AdbProxyService : Service() {
                 execShellCommand(arrayOf("setprop", "persist.adb.tcp.port", ""))
 
                 // Use same multi-fallback restart
-                val restarted = execShellCommand(arrayOf("setprop", "ctl.restart", "adbd"))
+                var restarted = execShellCommand(arrayOf("setprop", "ctl.restart", "adbd"))
                 if (!restarted) {
-                    execShellCommand(arrayOf("stop", "adbd"))
-                    execShellCommand(arrayOf("start", "adbd"))
+                    val stopped = execShellCommand(arrayOf("stop", "adbd"))
+                    restarted = if (stopped) execShellCommand(arrayOf("start", "adbd")) else false
                 }
+
+                // Invalidate the pin only once adbd has actually been asked to restart.
+                if (restarted) {
+                    af.shizuku.manager.adb.AdbServerPin
+                        .store()
+                        .clear()
+                }
+
                 Timber.tag(TAG).i("adbd TCP mode disabled")
-                true
+                restarted
             } catch (e: Exception) {
                 Timber.tag(TAG).e(e, "Failed to disable adbd TCP mode")
                 false

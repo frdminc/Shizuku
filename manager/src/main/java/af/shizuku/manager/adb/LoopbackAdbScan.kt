@@ -62,8 +62,6 @@ internal object LoopbackAdbScan {
                         return@execute
                     }
                 val key = AdbKey(PreferenceAdbKeyStore(prefs), "shizuku+")
-                // Initialize the lazy TLS context once, before concurrent socket work.
-                key.sslContext
                 repeat(CONCURRENCY) {
                     if (workers.isShutdown) return@repeat
                     workers.execute scanWorker@{
@@ -71,7 +69,7 @@ internal object LoopbackAdbScan {
                             val port = next.getAndIncrement()
                             if (port > range.last) break
                             if (port in excluded) continue
-                            val client = AdbClient("127.0.0.1", port, key, connectTimeoutMs = CONNECT_MS)
+                            val client = AdbClient("127.0.0.1", port, key, connectTimeoutMs = CONNECT_MS, commitFirstUse = false)
                             synchronized(lock) {
                                 if (stopped) return@scanWorker
                                 pending += client

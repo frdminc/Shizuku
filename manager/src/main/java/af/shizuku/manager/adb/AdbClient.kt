@@ -54,6 +54,16 @@ class AdbClient(
      */
     private val allowLegacyAuth: () -> Boolean = { false },
     private val connectTimeoutMs: Int = 5000,
+    private val pinStore: PreferenceAdbServerPinStore = AdbServerPin.store(),
+    private val pinChangeLog: ((String) -> Unit)? = null,
+    /** The exact SPKI the user confirmed; no other changed key is accepted. */
+    private val expectedPin: String? = null,
+    private val requireRecordedPin: Boolean = false,
+    /**
+     * Whether a first successful A_CNXN over TLS should commit the pin. Scan connections set this
+     * to false so the brute-force scan cannot take the first-use pin.
+     */
+    private val commitFirstUse: Boolean = true,
 ) : Closeable {
     private val socketLock = Any()
     private var aborted = false
@@ -83,6 +93,9 @@ class AdbClient(
         (if (useTls) tlsOutputStream else plainOutputStream)
             ?: throw IllegalStateException("outputStream is null - AdbClient not connected or closed")
 
+    private var pinTrust: PinnedAdbServerTrustManager? = null
+    val seenPin: String? get() = pinTrust?.seenPin
+
     fun connect() {
         require(port in 1..65535) { "port out of range: $port" }
         useTls = false // Reset TLS state for each connection attempt
@@ -96,6 +109,7 @@ class AdbClient(
         }
         val address = InetSocketAddress(host, port)
 
+        pinTrust = null
         try {
             s.connect(address, connectTimeoutMs)
             s.tcpNoDelay = true
@@ -118,7 +132,9 @@ class AdbClient(
                 }
                 write(A_STLS, A_STLS_VERSION, 0)
 
-                val sslContext = key.sslContext
+                val trust = PinnedAdbServerTrustManager(pinStore, expectedPin, pinChangeLog, requireRecordedPin)
+                pinTrust = trust
+                val sslContext = key.sslContext(trust)
                 val ts = sslContext.socketFactory.createSocket(s, host, port, true) as SSLSocket
                 tlsSocket = ts
                 ts.startHandshake()
@@ -142,8 +158,15 @@ class AdbClient(
             }
 
             if (message.command != A_CNXN) error("not A_CNXN")
+            if (useTls && commitFirstUse) pinTrust?.commitFirstUse()
         } catch (e: Exception) {
             close()
+            var reason: Throwable? = e
+            while (reason != null) {
+                if (reason is AdbServerPinMissingException) throw reason
+                reason = reason.cause
+            }
+            if (pinTrust?.mismatchSeen == true) throw AdbServerCertChangedException(e, pinTrust?.seenPin)
             throw e
         }
     }
@@ -309,6 +332,9 @@ class AdbClient(
             throw AdbCommandLimitException("${cmd.substringBefore(':')} command stopped: $reason")
         }
         write(A_OPEN, localId, 0, cmd)
+        // These services restart adbd; invalidate only once the command has been sent successfully.
+        // A failed write keeps the existing pin so a retry does not trust a changed key blindly.
+        if (cmd.startsWith("tcpip:") || cmd == "usb:") pinStore.clear()
 
         var message = read()
         when (message.command) {

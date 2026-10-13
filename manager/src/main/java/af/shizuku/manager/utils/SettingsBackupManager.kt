@@ -12,6 +12,13 @@ object SettingsBackupManager {
     // boundaries. User-facing preference keys (theme, features, API keys) are NOT excluded.
     private val EXCLUDED_KEYS =
         setOf(
+            // Local ADB identity and daemon lifetime must stay on this installation.
+            "adbkey",
+            af.shizuku.manager.adb.PreferenceAdbServerPinStore.CONNECT_KEY,
+            af.shizuku.manager.adb.PreferenceAdbServerPinStore.CONNECT_BOOT_KEY,
+            af.shizuku.manager.adb.PreferenceAdbServerPinStore.GENERATION_KEY,
+            "adb_server_pin_pending_port",
+            "adb_server_pin_pending_boot",
             // Remote DB cache
             ShizukuSettings.Keys.KEY_LAST_DB_UPDATE,
             ShizukuSettings.Keys.KEY_REMOTE_DB_JSON,

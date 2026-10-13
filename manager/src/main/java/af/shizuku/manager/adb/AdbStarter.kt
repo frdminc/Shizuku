@@ -93,6 +93,14 @@ object AdbStarter {
         log: ((String) -> Unit)? = null,
         attempt: Long = AdbAuthWait.NO_ATTEMPT,
         connectedClient: AdbClient? = null,
+        /**
+         * True only when this start was made by the user's own hand in the app's UI and may ask
+         * the user to confirm a changed adbd key. Exported intents, tiles, boot and headless paths
+         * must leave this false.
+         */
+        userGesture: Boolean = false,
+        /** The exact SPKI approved by the user's confirmation. */
+        confirmedPin: String? = null,
     ) {
         HeadlessLogger.init(context)
         if (port !in 1..65535) {
@@ -115,6 +123,7 @@ object AdbStarter {
         // Set when this call stood down because another start owns the authorisation wait; the
         // finally block must then leave wireless debugging alone — it is the owner's transport.
         var stoodDown = false
+        var pinRefused = false
 
         suspend fun AdbClient.runCommand(cmd: String) {
             command(cmd) { log?.invoke(String(it)) }
@@ -155,11 +164,38 @@ object AdbStarter {
 
                 var activePort = port
                 var retained = connectedClient
+                var retryPin = confirmedPin.takeIf { userGesture }
 
                 fun nextClient(): AdbClient {
                     val connected = retained
                     retained = null
-                    return connected ?: activePort.let { p -> AdbClient("127.0.0.1", p, key, onPending, allowLegacyAuth = { isLegacyAuthPort(p) }) }
+                    if (connected != null) {
+                        val pin = AdbServerPin.store().connectPin
+                        if (pin == null || connected.seenPin != pin) {
+                            val seen = connected.seenPin
+                            connected.close()
+                            if (pin == null) {
+                                AdbServerPin.pendingPort = activePort
+                                throw AdbServerPinMissingException(seen)
+                            }
+                            throw AdbServerCertChangedException(seenPin = seen)
+                        }
+                        return connected
+                    }
+                    val expected = retryPin
+                    retryPin = null
+                    return activePort.let { p ->
+                        AdbClient(
+                            "127.0.0.1",
+                            p,
+                            key,
+                            onPending,
+                            allowLegacyAuth = { isLegacyAuthPort(p) },
+                            pinChangeLog = log,
+                            expectedPin = expected,
+                            requireRecordedPin = activePort == AdbServerPin.pendingPort,
+                        )
+                    }
                 }
 
                 suspend fun connectUnlessRetained(client: AdbClient) {
@@ -167,7 +203,7 @@ object AdbStarter {
                 }
                 val tcpMode = ShizukuSettings.getTcpMode()
                 val tcpPort = ShizukuSettings.getTcpPort()
-                HeadlessLogger.i(LOG, "start on port $port (tcp_mode=$tcpMode tcp_port=$tcpPort interactive=${log != null})")
+                HeadlessLogger.i(LOG, "start on port $port (tcp_mode=$tcpMode tcp_port=$tcpPort interactive=${log != null} user_gesture=$userGesture confirmed_key=${confirmedPin != null})")
                 if (tcpMode && activePort != tcpPort) {
                     if (tcpPort !in 1..65535) {
                         Timber.tag(TAG).w("TCP mode enabled but stored TCP port is invalid ($tcpPort) — skipping TCP redirect")
@@ -207,6 +243,7 @@ object AdbStarter {
                     // A port found by the loopback scan is not saved: the next first attempt dials the
                     // saved port with an ordinary client, and only mDNS or a TCP port should seed it.
                     if (client !== connectedClient) ShizukuSettings.setLastPort(activePort)
+                    AdbServerPin.clearPendingPort()
                     AdbAuthWait.clearUnanswered()
                     ManagerActivityLog.log(context, "Service started via ADB on port $activePort")
                     ShizukuStateMachine.update()
@@ -216,6 +253,8 @@ object AdbStarter {
             }
         } catch (e: Exception) {
             if (e is AdbAuthPendingException) stoodDown = true
+            if (e is AdbServerPinException) pinRefused = true
+            if (e !is AdbServerPinMissingException) AdbServerPin.clearPendingPort()
             if (e is AdbTlsRequiredException) {
                 HeadlessLogger.w(LOG, "port $port answered without TLS; adbd reports tcp port ${EnvironmentUtils.getAdbTcpPort()}")
             }
@@ -245,8 +284,8 @@ object AdbStarter {
             throw e
         } finally {
             AdbAuthWait.starts.end()
-            if (!stoodDown && ShizukuSettings.getAutoDisableUsbDebugging() && context.checkSelfPermission(WRITE_SECURE_SETTINGS) == PackageManager.PERMISSION_GRANTED) {
-                Settings.Global.putInt(context.contentResolver, "adb_wifi_enabled", 0)
+            if (!stoodDown && !pinRefused && ShizukuSettings.getAutoDisableUsbDebugging() && context.checkSelfPermission(WRITE_SECURE_SETTINGS) == PackageManager.PERMISSION_GRANTED) {
+                AdbServerPin.putSetting(context, "adb_wifi_enabled", 0)
                 HeadlessLogger.i(LOG, "auto-disable: turned wireless debugging off")
             }
         }
@@ -262,7 +301,7 @@ object AdbStarter {
             runCatching {
                 val cr = context.contentResolver
                 if (context.checkSelfPermission(WRITE_SECURE_SETTINGS) == PackageManager.PERMISSION_GRANTED) {
-                    Settings.Global.putInt(cr, Settings.Global.ADB_ENABLED, 1)
+                    AdbServerPin.putSetting(context, Settings.Global.ADB_ENABLED, 1)
                     Settings.Global.putLong(cr, "adb_allowed_connection_time", 0L)
                 }
 
@@ -345,7 +384,8 @@ object AdbStarter {
                         // once the owner's key is accepted — start a second server in parallel.
                         e is AdbAuthPendingException ||
                         // The peer would not use TLS on a port that requires it; it will not change.
-                        e is AdbTlsRequiredException
+                        e is AdbTlsRequiredException ||
+                        e is AdbServerPinException
                     ) {
                         throw e
                     }

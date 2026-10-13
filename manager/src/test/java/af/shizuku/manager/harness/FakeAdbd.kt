@@ -51,6 +51,9 @@ class FakeAdbd(
     // "tcpip:<port>": adbd restarts listening on that port (the caller opens it).
     private val onTcpip: (Int) -> Unit = {},
     private val tls: Boolean = false,
+    private val fixedCertificate: Boolean = false,
+    private val fixedKey: Boolean = false,
+    private val omitTlsCnxn: Boolean = false,
     private val silentHello: Boolean = false,
     // Answers every A_OPEN with this chunk as output, again and again every [outputGapMs], until the
     // client hangs up: a command that never ends.
@@ -72,6 +75,14 @@ class FakeAdbd(
     private val signatureCount = AtomicInteger(0)
     val signatures: Int get() = signatureCount.get()
     val activeConnections: Int get() = open.size
+    val clientCertificates = AtomicInteger(0)
+    private val sharedKey by lazy {
+        java.security.KeyPairGenerator
+            .getInstance("RSA")
+            .apply { initialize(2048) }
+            .generateKeyPair()
+    }
+    private val fixedContext by lazy { newTlsContext() }
     val certificates = CopyOnWriteArrayList<java.security.cert.X509Certificate>()
     val greetingSizes = CopyOnWriteArrayList<Int>()
 
@@ -161,12 +172,13 @@ class FakeAdbd(
             if (tls) {
                 write(output, AdbMessage(af.shizuku.manager.adb.AdbProtocol.A_STLS, 0x01000000, 0, ByteArray(0)))
                 check(read(input)?.command == af.shizuku.manager.adb.AdbProtocol.A_STLS)
-                val socket = newTlsContext().socketFactory.createSocket(s, "127.0.0.1", s.port, true) as javax.net.ssl.SSLSocket
+                val socket = (if (fixedCertificate) fixedContext else newTlsContext()).socketFactory.createSocket(s, "127.0.0.1", s.port, true) as javax.net.ssl.SSLSocket
                 socket.useClientMode = false
                 socket.needClientAuth = true
                 socket.startHandshake()
                 input = DataInputStream(socket.inputStream)
                 output = socket.outputStream
+                if (omitTlsCnxn) return
             } else {
                 write(output, AdbMessage(A_AUTH, ADB_AUTH_TOKEN, 0, ByteArray(20)))
                 val signature = read(input) ?: return
@@ -218,10 +230,14 @@ class FakeAdbd(
     /** Each accepted connection gets a fresh self-signed certificate, like adbd. */
     private fun newTlsContext(): javax.net.ssl.SSLContext {
         val pair =
-            java.security.KeyPairGenerator
-                .getInstance("RSA")
-                .apply { initialize(2048) }
-                .generateKeyPair()
+            if (fixedKey) {
+                sharedKey
+            } else {
+                java.security.KeyPairGenerator
+                    .getInstance("RSA")
+                    .apply { initialize(2048) }
+                    .generateKeyPair()
+            }
         val name =
             org.bouncycastle.asn1.x500
                 .X500Name("CN=fake-adbd")
@@ -267,7 +283,9 @@ class FakeAdbd(
                 override fun checkClientTrusted(
                     chain: Array<out java.security.cert.X509Certificate>,
                     authType: String,
-                ) { }
+                ) {
+                    clientCertificates.incrementAndGet()
+                }
 
                 override fun checkServerTrusted(
                     chain: Array<out java.security.cert.X509Certificate>,

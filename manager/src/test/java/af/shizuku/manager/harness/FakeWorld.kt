@@ -81,7 +81,7 @@ class FakeWorld(
     // raising "Allow wireless debugging on this network?" ([trustPrompts]). The manager's key is
     // authorised there already (paired, or "Always allow" in adb_keys), and "tcpip:<port>" makes
     // adbd listen on that port ([tcpAdbd]). It speaks TLS, as adbd does on that port.
-    val wirelessAdbd = FakeAdbd(onShell = { serverUp() }, authorized = true, onTcpip = { openTcpPort(it) }, tls = true)
+    val wirelessAdbd = FakeAdbd(onShell = { serverUp() }, authorized = true, onTcpip = { openTcpPort(it) }, tls = true, fixedKey = true)
 
     /** adbd's classic TCP port once something has opened it; null while closed, as after a reboot. */
     @Volatile
@@ -175,6 +175,7 @@ class FakeWorld(
             .apply { isAccessible = true }
             .set(null, app)
         Starter.initialize(app)
+        ShizukuSettings.initialize(app)
         ShizukuSettings.setPreferencesForTesting(prefs)
         AdbAuthWait.clockMs = { clock.get() }
         AdbAuthWait.elapsedMs = { clock.get() }
